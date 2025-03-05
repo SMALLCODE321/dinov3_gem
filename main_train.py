@@ -3,8 +3,8 @@ import torch
 from vpr_model import VPRModel
 from dataloaders.LTA_Dataloader import ImageFolderDataModule
 
-if __name__ == '__main__':     
-    torch.set_float32_matmul_precision('high')   
+if __name__ == '__main__':
+    torch.set_float32_matmul_precision('high')
     datamodule = ImageFolderDataModule(
         batch_size=32, #32,
         shuffle_all=False, # shuffle all images or keep shuffling in-city only

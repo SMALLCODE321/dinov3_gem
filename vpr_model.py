@@ -230,6 +230,8 @@ class VPRModel(pl.LightningModule):
                 # split to ref and queries
                 num_references = val_dataset.num_references
                 positives = val_dataset.pIdx
+            elif 'LTA' in val_set_name:
+                print("#TODO")
             else:
                 print(f'Please implement validation_epoch_end for {val_set_name}')
                 raise NotImplemented 

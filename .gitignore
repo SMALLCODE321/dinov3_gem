@@ -1,0 +1,12 @@
+# 忽略数据集目录
+datasets/
+train_result/
+output_extractor/
+
+# 忽略权重文件目录
+checkpoints/
+model_weights/
+
+# 忽略所有 .pth 文件
+*.pth
+*.pyc

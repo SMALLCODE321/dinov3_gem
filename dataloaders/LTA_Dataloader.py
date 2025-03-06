@@ -74,17 +74,17 @@ class ImageFolderDataModule(pl.LightningDataModule):
             # load train dataloader with reload routine
             self.reload()
 
-            # load validation sets (pitts_val, msls_val, ...etc)
-            self.val_datasets = []
-            for valid_set_name in self.val_set_names:
-                if 'UAV_Large_Tilt_Angle/val/query'  in valid_set_name:
-                    self.val_datasets.append(LTAValDataset(data_root='./datasets/'+valid_set_name, input_transform=self.transform_drone))
-                else:
-                    print(
-                        f'Validation set {self.val_set_name} does not exist or has not been implemented yet')
-                    raise NotImplementedError
-            if self.show_data_stats:
-                self.print_stats()
+            # # load validation sets (pitts_val, msls_val, ...etc)
+            # self.val_datasets = []
+            # for valid_set_name in self.val_set_names:
+            #     if 'UAV_Large_Tilt_Angle/val/query'  in valid_set_name:
+            #         self.val_datasets.append(LTAValDataset(data_root='./datasets/'+valid_set_name, input_transform=self.transform_drone))
+            #     else:
+            #         print(
+            #             f'Validation set {self.val_set_name} does not exist or has not been implemented yet')
+            #         raise NotImplementedError
+            # if self.show_data_stats:
+            #     self.print_stats()
 
     def reload(self):
         # 创建无人机数据数据集，对应每个地点直接加载对应的图像
@@ -115,26 +115,3 @@ class ImageFolderDataModule(pl.LightningDataModule):
         table.add_row(["# of images", f'{self.train_dataset.total_images}'])
         print(table.get_string(title="Training Dataset"))
         print()
-
-        table = PrettyTable()
-        table.field_names = ['Data', 'Value']
-        table.align['Data'] = "l"
-        table.align['Value'] = "l"
-        table.header = False
-        table.add_row([f"Validation set", f"{self.val_set_name}"])
-        # table.add_row(["# of places", f'{self.train_dataset.__len__()}'])
-        print(table.get_string(title="Validation Datasets"))
-        print()
-        
-
-        table = PrettyTable()
-        table.field_names = ['Data', 'Value']
-        table.align['Data'] = "l"
-        table.align['Value'] = "l"
-        table.header = False
-        table.add_row(
-            ["Batch size (PxK)", f"{self.batch_size}x{self.img_per_place}"])
-        table.add_row(
-            ["# of iterations", f"{self.train_dataset.__len__()//self.batch_size}"])
-        table.add_row(["Image size", f"{self.image_size}"])
-        print(table.get_string(title="Training config"))

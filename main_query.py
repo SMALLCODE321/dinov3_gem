@@ -303,22 +303,6 @@ if __name__ == '__main__':
     distances, indices = index.search(descriptors, args.topk_index)
     index.reset()
     del index
-    # matcher = [
-    #         PointMatcher(feature_type='sift', matcher_type='flann'),
-    #         # PointMatcher(feature_type='disk', matcher_type='lightglue'),
-    #         #    PointMatcher(feature_type='orb', matcher_type='bf'),
-    #         #    PointMatcher(feature_type='xfeat', matcher_type=args.matcher_type),
-    #            ]
-
-    #初始化一个点匹配器，用于后续的图像匹配
-    matcher = PointMatcher(feature_type='sift', matcher_type=args.matcher_type)
-    
-    """
-    对于每个测试图像，读取图像，执行定位计算，并将结果写入输出文件
-    如果找到匹配，则记录匹配的图像名和定位结果；
-    如果没有找到，则记录默认值
-    将每个测试图像的top-k匹配图像名称存储在topk_dic字典中
-    """
     topk_dic = {}  
     with open(args.output_file, 'w') as result_writer: 
         

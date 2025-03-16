@@ -12,6 +12,13 @@ import glob
 import os
 import random
 import numpy as np
+import re
+
+IMAGENET_MEAN_STD = {'mean': [0.485, 0.456, 0.406], 
+                     'std': [0.229, 0.224, 0.225]}
+
+VIT_MEAN_STD = {'mean': [0.5, 0.5, 0.5], 
+                'std': [0.5, 0.5, 0.5]}
 
 """
 该类继承自 torch.utils.data.Dataset，用于处理图像数据集
@@ -50,7 +57,8 @@ class ImageFolderDataset(Dataset):
                     all_images.extend(glob.glob(os.path.join(subfolder_path, ext)))
                 if not all_images:
                     continue
-
+                all_images = sorted(all_images)
+                
                 # 根据文件名前缀（例如 "w1", "w2", ...）分组，每组即一个 place
                 groups = {}
                 for img in all_images:
@@ -131,140 +139,131 @@ class ImageFolderDataset(Dataset):
         except UnidentifiedImageError:
             print(f'Image {path} could not be loaded')
             return Image.new('RGB', (224, 224))
-
-
-class LTAValDataset(Dataset):
-    """
-    LTA 验证数据集。
-      - 一张卫星基础图（文件名以“-0.jpg”结尾）
-      - 多张无人机视图（文件名中包含“-70.jpg”, “-75.jpg”, “-80.jpg”, “-82.jpg”, “-85.jpg”）
+        
+class ValDataset(Dataset):
+    def __init__(self, im_path='', image_size=None, mean_std=IMAGENET_MEAN_STD):
+        self.mean_dataset = mean_std['mean']
+        self.std_dataset = mean_std['std']
+        self.input_transform = T.Compose([
+            T.Resize(image_size, interpolation=T.InterpolationMode.BILINEAR),
+            T.ToTensor(),
+            T.Normalize(mean=self.mean_dataset, std=self.std_dataset),
+        ])
+        self.image_size = image_size
+        # 调用 __getdata 方法获取所有图片路径
+        self.data = self.__getdata__(im_path)
     
-    验证时仅对每张图像进行单次预处理（例如 Resize、Normalize 等），
-    由参数 input_transform 传入，通常不包含随机性的数据增强操作。
-    """
-    def __init__(self, data_root, input_transform=None):
+    def __getdata__(self, root_dir):
         """
-        Args:
-            data_root (str): 存储各个地点子文件夹的根目录
-            input_transform (callable, optional): 对图像进行预处理的函数/变换
+        遍历 root_dir 下的所有子文件夹，每个子文件夹代表一个底图，
+        对每个子文件夹：
+          - 查找其中的 xlsx 文件（包含标注框坐标）
+          - 查找以 "w" 开头且是 jpg/jpeg/png 的图片（对应 UAV 图片）
+          - 按照文件名中 "w数字" 分组
+          - 列表中每个样本的数据结构为：
+                {
+                  "uav": [图片路径列表],
+                  "label": {
+                      "coords": (d1, d2),
+                      "base_img": 子文件夹名称（代表底图）
+                  }
+                }
         """
-        super(LTAValDataset, self).__init__()
-        self.data_root = data_root
-        self.input_transform = input_transform
-        self.places_ids, self.total_images = self._get_places_data()
-
-    def _get_places_data(self):
-        places = {}
-        total_images = 0
-        valid_place_idx = 0
-
-        if os.path.isdir(self.data_root):
-            # 遍历 data_root 下的所有子文件夹（例如 query 或 train 文件夹下的 "1", "2", "3", ...）
-            subfolders = sorted(os.listdir(self.data_root))
-            for subfolder in subfolders:
-                subfolder_path = os.path.join(self.data_root, subfolder)
-                if not os.path.isdir(subfolder_path):
-                    continue
-
-                # 获取当前子文件夹中所有图片文件
-                all_images = []
-                for ext in ("*.jpg", "*.jpeg", "*.png", "*.bmp"):
-                    all_images.extend(glob.glob(os.path.join(subfolder_path, ext)))
-                if not all_images:
-                    continue
-
-                # 根据文件名前缀（例如 "w1", "w2", ...）分组
-                groups = {}
-                for img in all_images:
-                    base = os.path.basename(img)
-                    parts = base.split("-")
-                    if len(parts) < 2:
-                        continue
-                    place_key = parts[0]
-                    groups.setdefault(place_key, []).append(img)
-
-                # 为每个分组构造地点条目
-                for key, group_images in groups.items():
-                    # 选取卫星底图：文件名以“-0.jpg”结尾
-                    satellite_imgs = [img for img in group_images if img.lower().endswith("-0.jpg")]
-                    if not satellite_imgs:
-                        continue
-                    satellite_img = satellite_imgs[0]
-
-                    # 选取 UAV 视图，必须包含以下五张图："-70.jpg", "-75.jpg", "-80.jpg", "-82.jpg", "-85.jpg"
-                    required_suffixes = ["-70.jpg", "-75.jpg", "-80.jpg", "-82.jpg", "-85.jpg"]
-                    uav_imgs = []
-                    for suffix in required_suffixes:
-                        found_img = None
-                        for img in group_images:
-                            if img.lower().endswith(suffix):
-                                found_img = img
-                                break  # 只取第一个找到的
-                        if found_img is None:
-                            # 如果缺少某个必需的 UAV 图像，则跳过该地点
-                            uav_imgs = []
-                            break
-                        uav_imgs.append(found_img)
-
-                    # 如果 UAV 图像不足 5 张，则跳过该地点
-                    if len(uav_imgs) != 5:
-                        continue
-
-                    places[valid_place_idx] = {
-                        "satellite": satellite_img,
-                        "uav": uav_imgs,
-                        "label": valid_place_idx
+        data = {}
+        index = 0
+        # 遍历所有子文件夹
+        for sub_folder in os.listdir(root_dir):
+            sub_folder_path = os.path.join(root_dir, sub_folder)
+            if not os.path.isdir(sub_folder_path):
+                continue
+            
+            image_paths = []
+            xlsx_file = None  # 每个子文件夹中 xlsx 文件的路径
+            # 遍历子文件夹中的所有文件
+            for file_name in os.listdir(sub_folder_path):
+                if file_name.endswith('.xlsx'):
+                    xlsx_file = os.path.join(sub_folder_path, file_name)
+                elif file_name.startswith("w") and file_name.lower().endswith(('.jpg', '.jpeg', '.png')):
+                    image_paths.append(os.path.join(sub_folder_path, file_name))
+            
+            if xlsx_file is None:
+                # 如果没有 xlsx 文件，则跳过该文件夹
+                continue
+            
+            # 按照文件名中第一个分割部分 (例如 "w1") 分组
+            groups = {}
+            for img_path in image_paths:
+                base = os.path.basename(img_path)
+                parts = base.split("-")
+                if len(parts) < 2:
+                    continue  # 文件名格式不符合预期时跳过
+                place_key = parts[0]  # 例如 "w1"
+                groups.setdefault(place_key, []).append(img_path)
+            
+            # 读取 xlsx 文件，获取每个组的坐标信息
+            coords_map = self.__read_coords__(xlsx_file)
+            for key, group_images in groups.items():
+                # 获取该组的 d1 和 d2 坐标信息
+                coord = coords_map.get(key, ((None, None), (None, None)))
+                # 将底图信息（子文件夹名称）也写入 label 中
+                data[index] = {
+                    "uav": group_images,
+                    "label": {
+                        "coords": coord,
+                        "base_img": sub_folder  # 该子文件夹即代表底图
                     }
-                    total_images += 1 + len(uav_imgs)
-                    valid_place_idx += 1
-        else:
-            raise NotImplementedError("data_root 应为包含各个子文件夹的目录。")
-        return places, total_images
+                }
+                index += 1
+        return data
+    
+    def __read_coords__(self, xlsx_file):
+        """
+        读取 xlsx 文件，解析每行记录。
+        假设 xlsx 文件中有列 '组标名称'、'x' 和 'y'：
+            '组标名称' 格式为 "w1-d1" 或 "w1-d2"
+            对应 'x' 和 'y' 列分别表示该点的横纵坐标
+        根据相同的 w 标识，分别保存 d1（左上坐标）和 d2（右下坐标）
+        """
+        df = pd.read_excel(xlsx_file)
+        # 临时字典，用于按基础标识整理 d1 和 d2
+        coords_temp = {}
+        pattern = re.compile(r'^(w\d+)-(d[12])$')
+        for _, row in df.iterrows():
+            group_name = str(row['坐标名称'])
+            m = pattern.match(group_name)
+            if not m:
+                continue
+
+            parts = group_name.split('-')
+            if len(parts) == 2:
+                base_id, pos = parts  # pos 可能为 "d1" 或 "d2"
+                coordinate = (row['x'], row['y'])
+                if base_id not in coords_temp:
+                    coords_temp[base_id] = {}
+                coords_temp[base_id][pos] = coordinate
+        # 生成最终的映射字典：base_id -> (d1, d2)
+        coords_map = {}
+        for base_id, pos_dict in coords_temp.items():
+            d1 = pos_dict.get('d1', None)
+            d2 = pos_dict.get('d2', None)
+            coords_map[base_id] = (d1, d2)
+        return coords_map
 
     def __getitem__(self, index):
         """
-        对应某个地点，加载卫星图和所有无人机图像，并应用预处理变换。
-        
-        Returns:
-            (sat_img, uav_imgs, label)
-              sat_img: 预处理后的卫星图像
-              uav_imgs: 经过 input_transform 后堆叠的无人机图像张量 (shape: [n, C, H, W])
-              label: 当前地点的编号（torch.tensor 对象）
+        返回的样本现在包含：
+          - 多张 UAV 图片（经过数据变换）
+          - label 信息，其中包含了标注框坐标和该样本所属的底图标识
         """
-        entry = self.places_ids[index]
-        sat_img_path = entry["satellite"]
-        uav_img_paths = entry["uav"]
-
-        # 加载卫星图像
-        sat_img = self.image_loader(sat_img_path)
-        if self.input_transform is not None:
-            sat_img = self.input_transform(sat_img)
-
-        # 加载所有无人机视图并应用预处理
+        sample = self.data[index]
         imgs = []
-        imgs.append(sat_img)
-        for path in uav_img_paths:
-            img = self.image_loader(path)
-            if self.input_transform is not None:
+        for img_path in sample["uav"]:
+            img = Image.open(img_path).convert('RGB')
+            if self.input_transform:
                 img = self.input_transform(img)
             imgs.append(img)
-        label = torch.tensor(entry["label"]).repeat(len(imgs))
-
-        return torch.stack(imgs), label
+        label = sample["label"]
+        return imgs, label
 
     def __len__(self):
-        return len(self.places_ids)
-
-    @staticmethod
-    def image_loader(path):
-        """
-        加载图像为 RGB 模式。如果加载失败则返回一个空白图像。
-        """
-        try:
-            with open(path, 'rb') as f:
-                img = Image.open(f)
-                return img.convert("RGB")
-        except Exception as e:
-            print(f"加载图像 {path} 失败，异常：{e}")
-            # 返回一个默认的空白图片（尺寸可根据需要调整）
-            return Image.new("RGB", (224, 224))
+        return len(self.data)

@@ -12,13 +12,13 @@
             "program": "${workspaceFolder}/feature_extractor.py",
             "console": "integratedTerminal",
             "args": [
-                "--input_dir", "/data/qiaoq/Project/salad_tz/datasets/UAV_Large_Tilt_Angle/train/gallery",
+                "--input_dir", "/data/qiaoq/Project/salad_tz/datasets/UAV_Large_Tilt_Angle/val/gallery",
                 "--save_dir", "/data/qiaoq/Project/salad_tz/output_extractor/train_db",
-                "--ckpt_path", "/data/qiaoq/Project/salad_tz/checkpoints/dino_salad.ckpt",
-                "--image_size", "512",
-                "--crop_size", "1080,2048",
-                "--step_size", "864,1638",
-                "--batch_size", "256",
+                "--ckpt_path", "/data/qiaoq/Project/salad_tz/train_result/model/model6e-5-50epoch.pth",
+                "--image_size", "322,322",
+                "--crop_size", "750,750",
+                "--step_size", "500,500",
+                "--batch_size", "128",
                 "--num_workers", "8"
             ]
         },
@@ -29,23 +29,43 @@
             "program": "${workspaceFolder}/create_index.py",
             "console": "integratedTerminal",
             "args": [
-                "--npy_directory", "/data/qiaoq/Project/salad_tz/output_extractor/test_db/",
-                "--index_file", "/data/qiaoq/Project/salad_tz/output_extractor/test_db/index",
+                "--npy_directory", "./output_extractor/train_db_uavvisloc_20epoch",
+                "--index_file", "./output_extractor/train_db_uavvisloc_20epoch/faiss.index",
                 "--index_type", "flat",
-                "--group_num", "1"
+                "--group_num", "1",
+                "--base_info_file", "./datasets/UAV-Visloc/image_info.txt",
+                "--crop_size", "980,980",
+                "--step_size", "500,500",
+                "--index_info_file", "./output_extractor/train_db_uavvisloc_20epoch/patches_index.csv"
             ]
         },
         {
-            "name": "Debug create_index_info.py",
+            "name": "Debug eval_LTA.py",
             "type": "debugpy",
             "request": "launch",
-            "program": "${workspaceFolder}/create_index_info.py",
+            "program": "${workspaceFolder}/eval_LTA.py",
             "console": "integratedTerminal",
             "args": [
-                "--base_info_file", "/data/qiaoq/Project/salad_tz/datasets/UAV_Large_Tilt_Angle/train/gallery/image_info.txt",
-                "--crop_size", "1080,2048",
-                "--step_size", "864,1638",
-                "--index_info_file", "/data/qiaoq/Project/salad_tz/output_extractor/train_db/index_info.csv"
+                "--val_path", "/data/qiaoq/Project/salad_tz/datasets/UAV_Large_Tilt_Angle/val/query",
+                "--ckpt_path", "/data/qiaoq/Project/salad_tz/train_result/model/tzb-model1e-6-50epoch.pth",
+                "--image_size", "322,322",
+                "--index_path", "./output_extractor/train_db_LTA_50epoch_tzbbase/faiss.index",
+                "--index_info_csv", "./output_extractor/train_db_LTA_50epoch_tzbbase/patches_index.csv"
+            ]
+        },
+        {
+            "name": "Debug eval_UAV_Visloc.py",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/eval_UAV_visloc.py",
+            "console": "integratedTerminal",
+            "args": [
+                "--val_path", "/data/qiaoq/Project/salad_tz/datasets/UAV-Visloc",
+                "--ckpt_path", "./train_result/model/model6e-5-50epoch.pth",
+                "--image_size", "322,322",
+                "--index_path", "./output_extractor/train_db_uavvisloc_50epoch/faiss.index",
+                "--index_info_csv", "./output_extractor/train_db_uavvisloc_50epoch/patches_index.csv",
+                "--batch_size", "1"
             ]
         }
     ]

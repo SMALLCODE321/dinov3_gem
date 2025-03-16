@@ -1,14 +1,14 @@
 #!/bin/sh
-DB_DIR=/data/qiaoq/Project/salad_tz/datasets/UAV_Large_Tilt_Angle/train/gallery
+DB_DIR=/data/qiaoq/Project/salad_tz/datasets/UAV_Large_Tilt_Angle/val/gallery
 EXP_DIR=/data/qiaoq/Project/salad_tz/output_extractor
-MODEL_FILE='/data/qiaoq/Project/salad_tz/checkpoints/dino_salad.ckpt'
-CROP_SIZE=1080,2048 # crop databse images into crops of crop_size 
-STEP_SIZE=864,1638
-IM_SIZE=700,1400
-BS=256
+MODEL_FILE='./train_result/model/tzb-model1e-6-50epoch.pth'
+CROP_SIZE=750,750 # LTA 750  UAVvisloc 980
+STEP_SIZE=500,500
+IM_SIZE=322,322
+BS=128
 
-CUDA_VISIBLE_DEVICES=0,1 python feature_extractor.py --input_dir ${DB_DIR} \
-                                                     --save_dir ${EXP_DIR}/train_db \
+CUDA_VISIBLE_DEVICES=1 python feature_extractor.py --input_dir ${DB_DIR} \
+                                                     --save_dir ${EXP_DIR}/train_db_LTA_50epoch_tzbbase \
                                                      --ckpt_path ${MODEL_FILE} \
                                                      --image_size ${IM_SIZE} \
                                                      --crop_size ${CROP_SIZE} \

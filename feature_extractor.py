@@ -6,6 +6,8 @@ import numpy as np
 import argparse
 import os
 import glob
+from PIL import Image
+Image.MAX_IMAGE_PIXELS = None
 
 from vpr_model import VPRModel 
 # Dataloader
@@ -90,14 +92,17 @@ if __name__ == '__main__':
 
     args = parse_args()
     
-    model = load_model(args.ckpt_path) 
+    model = torch.load(args.ckpt_path) 
     model.eval() 
+    model = model.to('cuda')
     device = torch.device('cuda')
+    # model = load_model(args.ckpt_path)
     
     if not os.path.exists(args.save_dir):  
         os.makedirs(args.save_dir)
   
-    im_paths = sorted(glob.glob(os.path.join(args.input_dir, '*.jpg'))) 
+    # im_paths = sorted(glob.glob(os.path.join(args.input_dir, '*.jpg')))
+    im_paths = sorted(glob.glob(os.path.join(args.input_dir, '**', '*.jpg'), recursive=True))
        
     for im_file_path in tqdm(im_paths):
         descriptors_allsize = []

@@ -5,13 +5,15 @@ import numpy as np
 import argparse
 import os
 import cv2
-import glob 
+import glob
 import faiss
 import pandas as pd
 from vpr_model import VPRModel 
-from dataloaders.LTA_Dataset import ValDataset
+# 使用新数据集的 Dataloader
+from dataloaders.UAVVislocDataset import UAVVislocDataset  
 from torchvision import transforms
 
+# 输入图像预处理（根据模型输入需要做相应的处理）
 input_transform = transforms.Compose([
     transforms.Resize((384, 384)),
     transforms.ToTensor(),
@@ -19,25 +21,36 @@ input_transform = transforms.Compose([
                          std=[0.229, 0.224, 0.225])
 ])
 
-def compute_iou(boxA, boxB):
+def compute_distance(coordA, coordB):
     """
-    计算两个边界框之间的 Intersection over Union (IoU)
-    boxA, boxB: (left, top, right, bottom)
-    """
-    xA = max(boxA[0], boxB[0])
-    yA = max(boxA[1], boxB[1])
-    xB = min(boxA[2], boxB[2])
-    yB = min(boxA[3], boxB[3])
+    计算两个地理坐标之间的距离，单位为米（采用 Haversine 公式）
     
-    interW = max(0, xB - xA)
-    interH = max(0, yB - yA)
-    inter_area = interW * interH
-    if inter_area == 0:
-        return 0.0
-    boxA_area = (boxA[2] - boxA[0]) * (boxA[3] - boxA[1])
-    boxB_area = (boxB[2] - boxB[0]) * (boxB[3] - boxB[1])
-    iou = inter_area / float(boxA_area + boxB_area - inter_area)
-    return iou
+    参数:
+        coordA -- 第一个坐标，格式为 (latitude, longitude)，单位为度
+        coordB -- 第二个坐标，格式为 (latitude, longitude)，单位为度
+        
+    返回:
+        两点之间的距离（单位：米）
+    """
+    # 拆分坐标
+    lat1, lon1 = coordA
+    lat2, lon2 = coordB
+    
+    # 将角度转换为弧度
+    lat1, lon1, lat2, lon2 = map(np.radians, [lat1, lon1, lat2, lon2])
+    
+    # 计算经纬度差值
+    dlat = lat2 - lat1
+    dlon = lon2 - lon1
+    
+    # 使用 Haversine 公式计算 a 的值
+    a = np.sin(dlat / 2.0) ** 2 + np.cos(lat1) * np.cos(lat2) * np.sin(dlon / 2.0) ** 2
+    c = 2 * np.arctan2(np.sqrt(a), np.sqrt(1 - a))
+    
+    # 地球半径（单位：米）
+    earth_radius = 6371000
+    distance = earth_radius * c
+    return distance
 
 def average_precision(ranked_relevance):
     """
@@ -55,64 +68,90 @@ def average_precision(ranked_relevance):
             ap += correct / (i + 1)
     return ap / num_relevant
 
-def load_model(model_path, device):
-    if os.path.exists(model_path):
-        model = torch.load(model_path)
-        model.eval()
-        model.to(device)
-        print("Loaded model weights.")
-        return model
-    else:
-        print("Checkpoint not found, using randomly initialized model.")
+def load_model(ckpt_path):
+    # model = VPRModel(
+    #     backbone_arch='dinov2_vitb14',
+    #     backbone_config={
+    #         'num_trainable_blocks': 4,
+    #         'return_token': True,
+    #         'norm_layer': True,
+    #     },
+    #     agg_arch='SALAD',
+    #     agg_config={
+    #         'num_channels': 768,
+    #         'num_clusters': 64,
+    #         'cluster_dim': 128,
+    #         'token_dim': 256,
+    #     },
+    # )
+    # loaded_state_dict = torch.load(ckpt_path, map_location=torch.device('cuda:0'))
+    # if "state_dict" in loaded_state_dict.keys():
+    #     loaded_state_dict = loaded_state_dict["state_dict"]
+    # model.load_state_dict(loaded_state_dict)
+    # model = model.eval()
+    # model = model.to('cuda')
+    # print(f"Loaded model from {ckpt_path} Successfully!")
+    model = torch.load(ckpt_path) 
+    model.eval() 
+    model = model.to('cuda')
+    return model
+
+def custom_collate_fn(batch):
+    """
+    自定义 collate_fn：
+    - 对图片部分（Tensor）进行合并
+    - 对 label 部分保持原状，不转换成 Tensor
+    假设每个 sample 中只返回一张图片（即 imgs 列表只有一个元素）
+    """
+    for sample in batch:
+        sample_imgs, sample_label = sample
+
+    return sample_imgs, sample_label
 
 def convert_label_coords(label):
     """
-    转换 label 中 'coords' 字段，假设格式为：
-      'coords': [[[x1], [y1]], [[x2], [y2]]]
-    转换为：((x1, y1), (x2, y2))，确保 x1, y1, x2, y2 均为整型。
+    对于 UAVVislocDataset，新数据集的 label 已经是 UAV 图中心点的经纬度坐标
+    假设格式为:
+       - tuple: (latitude, longitude)
+       - 或者字典格式: {'center': (latitude, longitude)}
     """
     if "coords" in label:
         coords = label["coords"]
         try:
             def get_val(val):
                 return int(val.item()) if hasattr(val, "item") else int(val)
-            x1 = get_val(coords[0][0][0])
-            y1 = get_val(coords[0][1][0])
-            x2 = get_val(coords[1][0][0])
-            y2 = get_val(coords[1][1][0])
-            label["coords"] = ((x1, y1), (x2, y2))
+            x1 = get_val(coords[0][0])
+            y1 = get_val(coords[1][0])
+            label["coords"] = (x1, y1)
         except Exception as e:
             print("转换 coords 时出错：", e)
     return label
 
 def get_query_descriptors(model, dataloader, device):
     """
-    对于每个样本，不对多张 UAV 图片做平均处理，
-    而是每张图片独立检索，所有 UAV 图片共享同一个 label。
+    对于每个样本，不对多张 UAV 图片做平均处理，而是每张图片独立检索。
     返回：
       - descriptors: [N, feature_dim]，N 为所有 UAV 图片数量
-      - labels_all: 长度 N 的列表，每个元素为字典，包含 label 信息
+      - labels_all: 长度 N 的列表，每个元素为对应的标签（中心点经纬度）
     """
     descriptors = []
     labels_all = []
-    # 使用自动混合精度（若 device 为 cuda 则采用 float16，否则保持 float32）
+    # 使用自动混合精度（若 device 为 cuda，则采用 float16，否则 float32）
     dtype = torch.float16 if device == 'cuda' else torch.float32
     with torch.no_grad():
         with torch.autocast(device_type=device, dtype=dtype):
-            # dataloader 每个 batch 返回 (list of imgs, list of label)，
-            # 其中每个 imgs 为一个列表（该样本中的所有 UAV 图片）
+            # dataloader 每个 batch 返回 (imgs, label)
             for batch in tqdm(dataloader, desc='Calculating descriptors...'):
                 batch_imgs, batch_labels = batch
-                label = convert_label_coords(batch_labels)
-                # 遍历当前 batch 内的每个样本
+                # label = convert_label_coords(batch_labels)
+                # 遍历当前 batch 内的每个 UAV 图片
                 for img in batch_imgs:
-                    # 对该样本中的每张 UAV 图片单独计算描述符
-                        # img 已经过 transform 处理，shape 如 (3, H, W)
-                        img_tensor = img.to(device)  # shape: (1, 3, H, W)
-                        desc = model(img_tensor)  # shape: (1, feature_dim)
-                        descriptors.append(desc.cpu())
-                        # 每张 UAV 图片都使用相同 label，保存到列表中
-                        labels_all.append(label)
+                    # img 已经过 transform 处理，shape 如 (3, H, W)
+                    img_tensor = img.to(device)
+                    desc = model(img_tensor.unsqueeze(0))  # 增加 batch 维度
+                    descriptors.append(desc.cpu())
+                    # 每张 UAV 图片都使用相同 label，保存在列表中
+                    labels_all.append(batch_labels)
     descriptors = torch.cat(descriptors, dim=0)
     return descriptors, labels_all
 
@@ -120,16 +159,17 @@ def parse_args():
     parser = argparse.ArgumentParser(
         formatter_class=argparse.ArgumentDefaultsHelpFormatter
     )
+    # 测试文件夹路径，每个子文件夹代表一个底图，可按需调整
     parser.add_argument("--val_path", type=str, default='./data/test_images', 
-                        help="测试文件夹路径，每个子文件夹代表一个底图")
-    parser.add_argument('--output_file', type=str, default='/data/qiaoq/Project/salad_tz/train_result/model/result-iou0.1-model6e-5-20epoch.txt', 
+                        help="测试文件夹路径")
+    parser.add_argument('--output_file', type=str, default='/data/qiaoq/Project/salad_tz/train_result/model/result-distance_threshold-tzb.txt', 
                         help="结果保存文件")
     parser.add_argument("--ckpt_path", type=str, default='./dino_salad.ckpt', 
                         help="模型 checkpoint 路径")
     parser.add_argument("--index_path", type=str, default='./index.faiss', 
                         help="保存好的 FAISS 索引文件位置")
     parser.add_argument("--index_info_csv", type=str, default='./index_info.csv', 
-                        help="包含 patch 信息的 CSV 文件，字段至少包括: image_name, left, top, right, bottom")
+                        help="包含 patch 信息的 CSV 文件，字段至少包含: image_name, center_lat, center_lon")
     parser.add_argument('--image_size', type=lambda s: tuple(map(int, s.split(','))), default=None, 
                         help='全局特征提取器的输入尺寸，例如 "384,384"')
     parser.add_argument('--batch_size', type=int, default=1, 
@@ -138,8 +178,9 @@ def parse_args():
                         help='worker 数量')
     parser.add_argument('--topk_index', type=int, default=5, 
                         help='FAISS 检索返回前 K 个候选 patch')
-    parser.add_argument('--iou_threshold', type=float, default=0.1, 
-                        help='IoU 阈值，若 patch 与标注框 IoU 大于此值，认为匹配成功')
+    # 这里原参数名为 iou_threshold，但现在表示中心点之间的距离阈值
+    parser.add_argument('--distance_threshold', type=float, default=500, 
+                        help='距离阈值（单位与经纬度一致），若 patch 与无人机图中心点之间的距离小于此值，认为匹配成功')
     args = parser.parse_args()
     return args 
 
@@ -148,18 +189,21 @@ def main():
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     
     # 加载模型（全局特征提取模型）
-    model = load_model(args.ckpt_path, device)
+    model = load_model(args.ckpt_path)
+    if model is None:
+        return
 
-    # 构造验证数据集，使用更新后的 ValDataset（每个样本返回 (imgs, label)）
-    val_dataset = ValDataset(im_path=args.val_path, image_size=args.image_size)
+    # 构造新数据集，使用 UAVVislocDataset（__getitem__ 返回 (imgs, label)）
+    val_dataset = UAVVislocDataset(im_path=args.val_path, image_size=args.image_size)
     data_loader = DataLoader(val_dataset, 
                              num_workers=args.num_workers, 
                              batch_size=args.batch_size,
                              shuffle=False, 
                              drop_last=False, 
-                             pin_memory=True)
+                             pin_memory=True,
+                             collate_fn=custom_collate_fn)
     
-    # 针对每个 UAV 图片单独提取描述符，同时保留对应 label 信息
+    # 针对每个 UAV 图片单独提取描述符，同时保留对应标签（中心点坐标）
     print("Extracting query descriptors ...")
     query_descriptors, query_labels = get_query_descriptors(model, data_loader, device)
 
@@ -167,7 +211,7 @@ def main():
     print("Loading FAISS index from:", args.index_path)
     index = faiss.read_index(args.index_path) 
     index_info_csv = pd.read_csv(args.index_info_csv)  
-    # 假设 CSV 中包含字段：image_name, left, top, right, bottom
+    # 假设 CSV 中包含字段：image_name, center_lat, center_lon
 
     # 利用 FAISS 对所有查询描述符进行搜索，返回 topk_index 个候选 patch
     print("Performing FAISS search ...")
@@ -176,32 +220,34 @@ def main():
     index.reset()
     del index
 
-    # 对每个查询计算 IoU 得分，并记录是否命中
+    # 对每个查询计算匹配情况，并记录指标
     recall1, recall3, recall5 = 0, 0, 0
     ap_list = []
     num_valid_queries = 0
 
     # 遍历每个查询（每个 UAV 图片）
     for i, label in tqdm(enumerate(query_labels), total=len(query_labels), desc="Evaluating queries"):
-        # 每个 label 为字典，包含 "coords": ((d1_x, d1_y), (d2_x, d2_y)) 和 "base_img"
-        coords = label.get("coords", None)
-        # 若标注框无效，则跳过（例如未正确标注或解析失败）
-        if coords is None or coords[0][0] is None or coords[1][0] is None:
+        # 获取 UAV 图片的中心点坐标
+        if isinstance(label, dict):
+            query_center = label.get("coords", None)
+        else:
+            query_center = label
+        # 若中心点无效，则跳过
+        if query_center is None or len(query_center) != 2:
             continue
 
         num_valid_queries += 1
-        # 将标注框转换为 (left, top, right, bottom)
-        query_box = (coords[0][0], coords[0][1], coords[1][0], coords[1][1])
         ranked_relevance = []
-        # 针对当前查询得到 FAISS 检索返回的前 topk_index 个候选 patch
+        # 对当前查询的候选 patch 进行遍历
         for j in range(args.topk_index):
             patch_idx = indices[i][j]
             row = index_info_csv.iloc[patch_idx]
-            patch_box = (row["x1"], row["y1"], row["x2"], row["y2"])
-            iou = compute_iou(query_box, patch_box)
-            relevance = 1 if iou >= args.iou_threshold else 0
+            patch_center = (row["center_lat"], row["center_lon"])
+            dist = compute_distance(query_center, patch_center)
+            # 如果两个中心点之间的距离小于阈值，则认为匹配成功
+            relevance = 1 if dist < args.distance_threshold else 0
             ranked_relevance.append(relevance)
-        # Recall 评价：只要候选列表中前 k 个中至少有一个匹配（即 relevance 为 1）则算命中
+        # Recall 评价：只要候选列表中前 k 个中至少有一个符合匹配条件则算命中
         if ranked_relevance[0] == 1:
             recall1 += 1
         if sum(ranked_relevance[:3]) > 0:
@@ -212,7 +258,7 @@ def main():
         ap_list.append(ap)
 
     if num_valid_queries == 0:
-        print("没有有效的 query 标注（可能标注框为空），无法计算指标！")
+        print("没有有效的 query 标注，可能图片没有中心点信息，无法计算指标！")
         return
 
     overall_recall1 = recall1 / num_valid_queries

@@ -33,7 +33,7 @@ if __name__ == '__main__':
             'cluster_dim': 128,
             'token_dim': 256,
         },
-        lr = 1e-4,#6e-5,#
+        lr = 1e-6,#6e-5,#
         optimizer='adamw',
         weight_decay=9.5e-9, # 0.001 for sgd and 0 for adam,
         momentum=0.9,
@@ -74,16 +74,16 @@ if __name__ == '__main__':
         num_nodes=1,
         num_sanity_val_steps=0, # runs a validation step before stating training
         precision='16-mixed', # we use half precision to reduce  memory usage
-        max_epochs=20,
-        check_val_every_n_epoch=30, # run validation every epoch
+        max_epochs=50,
+        check_val_every_n_epoch=60, # run validation every epoch
         callbacks=[checkpoint_cb],# we only run the checkpointing callback (you can add more)
-        reload_dataloaders_every_n_epochs=5, # we reload the dataset to shuffle the order
-        log_every_n_steps=1,
+        reload_dataloaders_every_n_epochs=10, # we reload the dataset to shuffle the order
+        log_every_n_steps=5,
     )
 
-    pretrained_weight_path = './checkpoints/dino_salad.ckpt'
+    pretrained_weight_path = './checkpoints/tzb_model.ckpt'
     pretrained_state_dict = torch.load(pretrained_weight_path)
     model.load_state_dict(pretrained_state_dict)
     # we call the trainer, we give it the model and the datamodule
     trainer.fit(model=model, datamodule=datamodule)
-    torch.save(model, os.path.join('./train_result/model/', 'model1e-4.pth'))
+    torch.save(model, os.path.join('./train_result/model/', 'tzb-model1e-6-50epoch.pth'))

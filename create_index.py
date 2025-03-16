@@ -110,6 +110,11 @@ def process_faiss_index(args):
 def process_patches(args):
     """
     根据图像基础信息生成图像裁剪块 CSV 索引
+
+    修改说明：
+    - base_info_file 中保存的地理信息为左上和右下的经纬度坐标，
+      分别为：左上纬度、左上经度、右下纬度、右下经度。
+    - 根据图像尺寸计算像素的纬度及经度分辨率，并据此计算每个 patch 中心的经纬度。
     """
     base_info_file = args.base_info_file
     # 这里 args.crop_size 与 args.step_size 为列表，每个元素为一个二元组，取第一个传入的元组
@@ -122,8 +127,26 @@ def process_patches(args):
             parts = line.strip().split(',')
             if len(parts) < 3:
                 continue
-            image_name, W, H = parts[0], int(parts[1]), int(parts[2])
+
+            image_name = parts[0]
+            W, H = int(parts[1]), int(parts[2])
             
+            is_tif = image_name.lower().endswith('.tif')
+            if is_tif and len(parts) >= 7:
+                # 读取左上角和右下角的地理坐标信息
+                lat_top = float(parts[3])
+                lon_left = float(parts[4])
+                lat_bottom = float(parts[5])
+                lon_right = float(parts[6])
+                # 计算每个像素对应的经纬度变化量
+                lat_pixel_size = (lat_top - lat_bottom) / H
+                lon_pixel_size = (lon_right - lon_left) / W
+            else:
+                lat_top = None
+                lon_left = None
+                lat_pixel_size = None
+                lon_pixel_size = None
+
             # 按规定步长遍历图像区域，计算裁剪块的坐标信息
             for top in range(0, H, step_h):
                 for left in range(0, W, step_w):
@@ -141,6 +164,18 @@ def process_patches(args):
                         "x2": right,
                         "y2": bottom
                     }
+                    
+                    # 如果图像为 tif 且提供地理信息，则计算 patch 中心点的经纬度
+                    if is_tif and lat_top is not None:
+                        # 计算 patch 中心在像素中的位置
+                        patch_center_x = (left_adj + right) / 2.0
+                        patch_center_y = (top_adj + bottom) / 2.0
+                        # 根据图像坐标与地理坐标的线性关系计算中心经纬度
+                        center_lat = lat_top - patch_center_y * lat_pixel_size
+                        center_lon = lon_left + patch_center_x * lon_pixel_size
+                        patch["center_lat"] = center_lat
+                        patch["center_lon"] = center_lon
+
                     patches.append(patch)
     
     df = pd.DataFrame(patches)

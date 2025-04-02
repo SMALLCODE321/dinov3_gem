@@ -2,21 +2,52 @@ import pytorch_lightning as pl
 import torch
 from vpr_model import VPRModel
 from dataloaders.LTA_Dataloader import ImageFolderDataModule
+from dataloaders.LTA_pretrain_Dataloader import SatelliteImageDataModule
 import os
+
+def model_adjust(model, checkpoint):
+    
+    model_dict = model.state_dict()
+    # 针对 aggregator.score.3 参数进行手动更新
+    for key in ['aggregator.score.3.weight', 'aggregator.score.3.bias']:
+        if key in checkpoint:
+            pretrained_param = checkpoint[key]
+            current_param = model_dict[key]
+            if pretrained_param.shape != current_param.shape:
+                # 假设预训练参数尺寸为 [64, ...]，而当前模型为 [65, ...]
+                # 则我们将预训练参数复制到前64个通道，额外的 ghost cluster 随机初始化
+                new_param = current_param.clone()  # 先获取当前模型初始化的参数
+                new_param[:pretrained_param.shape[0]] = pretrained_param
+                model_dict[key] = new_param
+                # 你也可以在这里打印信息确认参数更新
+                print(f'Parameter {key} shape mismatch, pretrained param shape {pretrained_param.shape} -> new param shape {new_param.shape}')
+            else:
+                model_dict[key] = pretrained_param
+    return model_dict
 
 if __name__ == '__main__':
     torch.set_float32_matmul_precision('high')
-    datamodule = ImageFolderDataModule(
+    # datamodule = ImageFolderDataModule(
+    #     batch_size=32, #32,
+    #     shuffle_all=False, # shuffle all images or keep shuffling in-city only
+    #     img_per_place=8,
+    #     sat_aug_per_place=5,
+    #     image_size=(322,322),
+    #     num_workers=8,
+    #     show_data_stats=True,
+    #     data_path='/data/qiaoq/Project/salad_tz/datasets/UAV_Large_Tilt_Angle/train/query_low_resolution',
+    #     val_set_names=['UAV_Large_Tilt_Angle/val/query'], # pitts30k_val, pitts30k_test, msls_val
+    # )
+    datamodule = SatelliteImageDataModule(
         batch_size=32, #32,
-        shuffle_all=False, # shuffle all images or keep shuffling in-city only
-        img_per_place=8,
-        sat_aug_per_place=5,
         image_size=(322,322),
+        patch_size=(500,500),
+        num_places=100000,
+        sat_aug_per_place=5,
         num_workers=8,
-        show_data_stats=True,
-        data_path='/data/qiaoq/Project/salad_tz/datasets/UAV_Large_Tilt_Angle/train/query',
-        val_set_names=['UAV_Large_Tilt_Angle/val/query'], # pitts30k_val, pitts30k_test, msls_val
+        data_path='/data/qiaoq/Project/salad_tz/datasets/UAV_Large_Tilt_Angle/train/gallery',
     )
+
     
     model = VPRModel(
         #---- Encoder
@@ -33,7 +64,7 @@ if __name__ == '__main__':
             'cluster_dim': 128,
             'token_dim': 256,
         },
-        lr = 1e-6,#6e-5,#
+        lr = 6e-5,#普通的salad是6e-5,#对于tzb是1e-6
         optimizer='adamw',
         weight_decay=9.5e-9, # 0.001 for sgd and 0 for adam,
         momentum=0.9,
@@ -74,16 +105,22 @@ if __name__ == '__main__':
         num_nodes=1,
         num_sanity_val_steps=0, # runs a validation step before stating training
         precision='16-mixed', # we use half precision to reduce  memory usage
-        max_epochs=50,
-        check_val_every_n_epoch=60, # run validation every epoch
+        max_epochs=10,
+        check_val_every_n_epoch=100, # run validation every epoch
         callbacks=[checkpoint_cb],# we only run the checkpointing callback (you can add more)
         reload_dataloaders_every_n_epochs=10, # we reload the dataset to shuffle the order
-        log_every_n_steps=5,
+        log_every_n_steps=1,
     )
 
-    pretrained_weight_path = './checkpoints/tzb_model.ckpt'
+    pretrained_weight_path = './checkpoints/dino_salad.ckpt'
     pretrained_state_dict = torch.load(pretrained_weight_path)
+    # ghost加入，需要调整模型结构
+    # pretrained_state_dict = model_adjust(model, pretrained_state_dict)
+
     model.load_state_dict(pretrained_state_dict)
     # we call the trainer, we give it the model and the datamodule
+
+    # model = torch.load('/data/qiaoq/Project/salad_tz/train_result/model/model6e-5-4epoch-pretain-10k.pth')
+
     trainer.fit(model=model, datamodule=datamodule)
-    torch.save(model, os.path.join('./train_result/model/', 'tzb-model1e-6-50epoch.pth'))
+    torch.save(model, os.path.join('./train_result/model/', 'model6e-5-10epoch-pretain-100k-500size.pth'))

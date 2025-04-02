@@ -42,7 +42,6 @@ class ImageFolderDataModule(pl.LightningDataModule):
         self.save_hyperparameters() # save hyperparameter with Pytorch Lightening
 
         self.transform_sat = T.Compose([
-
             T.RandomResizedCrop(size=image_size, scale=(0.5, 1.0)),
             T.RandomRotation(degrees=360),
             T.RandomPerspective(distortion_scale=0.7, p=0.7, interpolation=3),

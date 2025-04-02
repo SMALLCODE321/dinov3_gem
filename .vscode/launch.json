@@ -46,11 +46,11 @@
             "program": "${workspaceFolder}/eval_LTA.py",
             "console": "integratedTerminal",
             "args": [
-                "--val_path", "/data/qiaoq/Project/salad_tz/datasets/UAV_Large_Tilt_Angle/val/query",
-                "--ckpt_path", "/data/qiaoq/Project/salad_tz/train_result/model/tzb-model1e-6-50epoch.pth",
+                "--val_path", "/data/qiaoq/Project/salad_tz/datasets/UAV_Large_Tilt_Angle/val/query_low_resolution",
+                "--ckpt_path", "/data/qiaoq/Project/salad_tz/train_result/model/tzb-model1e-6-50epoch-low_resolution.pth",
                 "--image_size", "322,322",
-                "--index_path", "./output_extractor/train_db_LTA_50epoch_tzbbase/faiss.index",
-                "--index_info_csv", "./output_extractor/train_db_LTA_50epoch_tzbbase/patches_index.csv"
+                "--index_path", "./output_extractor/train_db_LTA_50epoch_tzbbase_low_resolution/faiss.index",
+                "--index_info_csv", "./output_extractor/train_db_LTA_50epoch_tzbbase_low_resolution/patches_index.csv"
             ]
         },
         {

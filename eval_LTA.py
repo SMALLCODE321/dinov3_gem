@@ -184,14 +184,14 @@ def main():
     # 遍历每个查询（每个 UAV 图片）
     for i, label in tqdm(enumerate(query_labels), total=len(query_labels), desc="Evaluating queries"):
         # 每个 label 为字典，包含 "coords": ((d1_x, d1_y), (d2_x, d2_y)) 和 "base_img"
-        coords = label.get("coords", None)
+        bndbox = label.get("bndbox", None)
         # 若标注框无效，则跳过（例如未正确标注或解析失败）
-        if coords is None or coords[0][0] is None or coords[1][0] is None:
+        if bndbox is None:
             continue
 
         num_valid_queries += 1
         # 将标注框转换为 (left, top, right, bottom)
-        query_box = (coords[0][0], coords[0][1], coords[1][0], coords[1][1])
+        query_box = (int(bndbox[0]), int(bndbox[1]), int(bndbox[2]), int(bndbox[3]))
         ranked_relevance = []
         # 针对当前查询得到 FAISS 检索返回的前 topk_index 个候选 patch
         for j in range(args.topk_index):

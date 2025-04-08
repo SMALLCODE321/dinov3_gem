@@ -107,7 +107,7 @@ def process_faiss_index(args):
     faiss.write_index(index, args.index_file)
     print(f"Saved FAISS index to {args.index_file}")
 
-def process_patches(args):
+def process_patches_tif(args):
     """
     根据图像基础信息生成图像裁剪块 CSV 索引
 
@@ -178,6 +178,59 @@ def process_patches(args):
 
                     patches.append(patch)
     
+    df = pd.DataFrame(patches)
+    df.to_csv(args.index_info_file, index=False)
+    print(f"Saved image patch CSV index to {args.index_info_file}")
+
+def process_patches(args):
+    """
+    根据图像基础信息生成图像裁剪块 CSV 索引
+
+    修改说明：
+    - 只处理常见的 jpg/png 等图像，不处理 tif 图像。
+    - 基础信息文件（base_info_file）每一行包含：图像名称、图像宽度、图像高度，
+      多余的信息将被忽略。
+    - 输出 CSV 的表头为 image_name, x1, y1, x2, y2，
+      其中 (x1, y1) 和 (x2, y2) 分别表示裁剪块的左上和右下坐标。
+    """
+    import pandas as pd
+    from tqdm import tqdm
+
+    base_info_file = args.base_info_file
+    # args.crop_size 与 args.step_size 为列表，每个元素为一个二元组，取第一个传入的元组
+    crop_h, crop_w = args.crop_size[0]
+    step_h, step_w = args.step_size[0]
+
+    patches = []
+    with open(base_info_file, "r") as file:
+        for line in tqdm(file, desc="处理图像信息"):
+            parts = line.strip().split(' ')
+            image_name = parts[0]
+            # 只处理常见的 jpg/png 图像，跳过 tif 图像
+            if image_name.lower().endswith('.tif'):
+                continue
+
+            W, H = int(parts[1]), int(parts[2])
+
+            # 按照指定步长遍历图像区域，计算裁剪块的坐标信息
+            for top in range(0, H, step_h):
+                for left in range(0, W, step_w):
+                    bottom = min(top + crop_h, H)
+                    right = min(left + crop_w, W)
+
+                    # 若裁剪块不足指定尺寸，调整起始位置
+                    top_adj = top if (bottom - top) >= crop_h else max(bottom - crop_h, 0)
+                    left_adj = left if (right - left) >= crop_w else max(right - crop_w, 0)
+
+                    patch = {
+                        "image_name": image_name,
+                        "x1": left_adj,
+                        "y1": top_adj,
+                        "x2": right,
+                        "y2": bottom
+                    }
+                    patches.append(patch)
+
     df = pd.DataFrame(patches)
     df.to_csv(args.index_info_file, index=False)
     print(f"Saved image patch CSV index to {args.index_info_file}")

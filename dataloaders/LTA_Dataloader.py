@@ -45,6 +45,7 @@ class ImageFolderDataModule(pl.LightningDataModule):
             T.RandomResizedCrop(size=image_size, scale=(0.5, 1.0)),
             T.RandomRotation(degrees=360),
             T.RandomPerspective(distortion_scale=0.7, p=0.7, interpolation=3),
+            T.RandAugment(num_ops=3, interpolation=T.InterpolationMode.BILINEAR),
             T.Resize(image_size, interpolation=T.InterpolationMode.BILINEAR),
             T.ToTensor(),
             T.Normalize(mean=self.mean_dataset, std=self.std_dataset)

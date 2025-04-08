@@ -12,7 +12,8 @@ import glob
 import os
 import random
 import numpy as np
-import re
+import xml.etree.ElementTree as ET
+
 
 IMAGENET_MEAN_STD = {'mean': [0.485, 0.456, 0.406], 
                      'std': [0.229, 0.224, 0.225]}
@@ -104,7 +105,8 @@ class ImageFolderDataset(Dataset):
         for i in range(self.sat_aug_per_place):
         # 对原图复制后分别进行随机仿射变换，产生不同的增强版本
             img_copy = sat_img.copy()
-            aug_img = self.transform_sat(img_copy)
+            # aug_img = self.transform_sat(img_copy)  #消融实验
+            aug_img = self.transform_drone(img_copy)
             imgs.append(aug_img)
 
         # 加载无人机视图，并应用预处理
@@ -140,125 +142,121 @@ class ImageFolderDataset(Dataset):
             print(f'Image {path} could not be loaded')
             return Image.new('RGB', (224, 224))
         
+
 class ValDataset(Dataset):
     def __init__(self, im_path='', image_size=None, mean_std=IMAGENET_MEAN_STD):
         self.mean_dataset = mean_std['mean']
         self.std_dataset = mean_std['std']
+        self.image_size = image_size
         self.input_transform = T.Compose([
             T.Resize(image_size, interpolation=T.InterpolationMode.BILINEAR),
             T.ToTensor(),
             T.Normalize(mean=self.mean_dataset, std=self.std_dataset),
         ])
-        self.image_size = image_size
-        # 调用 __getdata 方法获取所有图片路径
+        # 调用 __getdata__ 方法获取所有样本信息
         self.data = self.__getdata__(im_path)
     
     def __getdata__(self, root_dir):
         """
-        遍历 root_dir 下的所有子文件夹，每个子文件夹代表一个底图，
-        对每个子文件夹：
-          - 查找其中的 xlsx 文件（包含标注框坐标）
-          - 查找以 "w" 开头且是 jpg/jpeg/png 的图片（对应 UAV 图片）
-          - 按照文件名中 "w数字" 分组
-          - 列表中每个样本的数据结构为：
-                {
-                  "uav": [图片路径列表],
-                  "label": {
-                      "coords": (d1, d2),
-                      "base_img": 子文件夹名称（代表底图）
-                  }
-                }
+        遍历 root_dir 下的所有子文件夹，每个子文件夹内包含一个 XML 文件和 UAV 图片，
+        对每个子文件夹进行如下处理：
+          - 根据 XML 文件获取底图路径及所有 object 的标注，
+          - 针对 XML 中的每个 object，根据其名称（例如 "w1"）在当前子文件夹内查找对应 UAV 图片，
+          - 将 UAV 图片列表、当前 object 对应的 bndbox 坐标、底图路径以及 object 名称保存到数据字典中。
         """
         data = {}
         index = 0
-        # 遍历所有子文件夹
         for sub_folder in os.listdir(root_dir):
             sub_folder_path = os.path.join(root_dir, sub_folder)
             if not os.path.isdir(sub_folder_path):
                 continue
+
+            # 查找 XML 文件（假设每个子文件夹只有一个 XML 文件）
+            xml_files = glob.glob(os.path.join(sub_folder_path, "*.xml"))
+            if not xml_files:
+                continue
+            xml_file = xml_files[0]
             
-            image_paths = []
-            xlsx_file = None  # 每个子文件夹中 xlsx 文件的路径
-            # 遍历子文件夹中的所有文件
-            for file_name in os.listdir(sub_folder_path):
-                if file_name.endswith('.xlsx'):
-                    xlsx_file = os.path.join(sub_folder_path, file_name)
-                elif file_name.startswith("w") and file_name.lower().endswith(('.jpg', '.jpeg', '.png')):
-                    image_paths.append(os.path.join(sub_folder_path, file_name))
-            
-            if xlsx_file is None:
-                # 如果没有 xlsx 文件，则跳过该文件夹
+            try:
+                tree = ET.parse(xml_file)
+                root = tree.getroot()
+            except Exception as e:
+                print(f"XML文件 {xml_file} 解析失败: {e}")
                 continue
             
-            # 按照文件名中第一个分割部分 (例如 "w1") 分组
-            groups = {}
-            for img_path in image_paths:
-                base = os.path.basename(img_path)
-                parts = base.split("-")
-                if len(parts) < 2:
-                    continue  # 文件名格式不符合预期时跳过
-                place_key = parts[0]  # 例如 "w1"
-                groups.setdefault(place_key, []).append(img_path)
+            # 从 XML 中获取底图路径（<path> 标签内容）
+            base_img_path = root.findtext("path")
+            if base_img_path is None:
+                print(f"XML文件 {xml_file} 缺少 <path> 标签信息")
+                continue
+
+            # 获取当前子文件夹中所有图片（假定 UAV 图片存放在此处）
+            image_paths = []
+            for file_name in os.listdir(sub_folder_path):
+                if file_name.lower().endswith(('.jpg', '.jpeg', '.png', '.bmp')):
+                    image_paths.append(os.path.join(sub_folder_path, file_name))
             
-            # 读取 xlsx 文件，获取每个组的坐标信息
-            coords_map = self.__read_coords__(xlsx_file)
-            for key, group_images in groups.items():
-                # 获取该组的 d1 和 d2 坐标信息
-                coord = coords_map.get(key, ((None, None), (None, None)))
-                # 将底图信息（子文件夹名称）也写入 label 中
+            # 遍历 XML 中的每个 object 节点，每个 object 对应一个样本
+            for obj in root.iter("object"):
+                obj_name = obj.findtext("name")
+                if not obj_name:
+                    continue
+
+                bndbox = obj.find("bndbox")
+                if bndbox is None:
+                    continue
+
+                try:
+                    xmin = int(bndbox.findtext("xmin"))
+                    ymin = int(bndbox.findtext("ymin"))
+                    xmax = int(bndbox.findtext("xmax"))
+                    ymax = int(bndbox.findtext("ymax"))
+                except Exception as e:
+                    print(f"解析 {xml_file} 中 object {obj_name} 的 bndbox 错误: {e}")
+                    continue
+
+                # 根据 object 名称（例如 "w1"）查找对应的 UAV 图片，要求文件名以 "w1-" 开头，如 "w1-70.jpg"
+                group_images = []
+                for img_path in image_paths:
+                    base_file = os.path.basename(img_path)
+                    if base_file.startswith(obj_name + "-"):
+                        suffix = base_file[len(obj_name) + 1:]  # 获取 "-" 后面的部分
+                        if not suffix.startswith("0"):
+                            group_images.append(img_path)
+                        group_images.append(img_path)
+                
+                if not group_images:
+                    # 如果未找到对应的 UAV 图片，则跳过该 object
+                    continue
+
+                # 保存当前 object 对应的样本信息
                 data[index] = {
                     "uav": group_images,
                     "label": {
-                        "coords": coord,
-                        "base_img": sub_folder  # 该子文件夹即代表底图
+                        "bndbox": (xmin, ymin, xmax, ymax),
+                        "base_img": base_img_path,
+                        "obj_name": obj_name
                     }
                 }
                 index += 1
+        
         return data
-    
-    def __read_coords__(self, xlsx_file):
-        """
-        读取 xlsx 文件，解析每行记录。
-        假设 xlsx 文件中有列 '组标名称'、'x' 和 'y'：
-            '组标名称' 格式为 "w1-d1" 或 "w1-d2"
-            对应 'x' 和 'y' 列分别表示该点的横纵坐标
-        根据相同的 w 标识，分别保存 d1（左上坐标）和 d2（右下坐标）
-        """
-        df = pd.read_excel(xlsx_file)
-        # 临时字典，用于按基础标识整理 d1 和 d2
-        coords_temp = {}
-        pattern = re.compile(r'^(w\d+)-(d[12])$')
-        for _, row in df.iterrows():
-            group_name = str(row['坐标名称'])
-            m = pattern.match(group_name)
-            if not m:
-                continue
-
-            parts = group_name.split('-')
-            if len(parts) == 2:
-                base_id, pos = parts  # pos 可能为 "d1" 或 "d2"
-                coordinate = (row['x'], row['y'])
-                if base_id not in coords_temp:
-                    coords_temp[base_id] = {}
-                coords_temp[base_id][pos] = coordinate
-        # 生成最终的映射字典：base_id -> (d1, d2)
-        coords_map = {}
-        for base_id, pos_dict in coords_temp.items():
-            d1 = pos_dict.get('d1', None)
-            d2 = pos_dict.get('d2', None)
-            coords_map[base_id] = (d1, d2)
-        return coords_map
 
     def __getitem__(self, index):
         """
-        返回的样本现在包含：
-          - 多张 UAV 图片（经过数据变换）
-          - label 信息，其中包含了标注框坐标和该样本所属的底图标识
+        对于每个样本：
+          - 加载所有 UAV 图片，并对其应用统一的数据预处理变换；
+          - 返回预处理后的 UAV 图片列表以及标签字典，
+            其中标签字典包含 bndbox 坐标、底图路径和对象名称（obj_name）。
         """
         sample = self.data[index]
         imgs = []
         for img_path in sample["uav"]:
-            img = Image.open(img_path).convert('RGB')
+            try:
+                img = Image.open(img_path).convert('RGB')
+            except Exception as e:
+                print(f"加载图像 {img_path} 失败: {e}")
+                img = Image.new('RGB', (self.image_size, self.image_size))
             if self.input_transform:
                 img = self.input_transform(img)
             imgs.append(img)
@@ -266,4 +264,5 @@ class ValDataset(Dataset):
         return imgs, label
 
     def __len__(self):
+        return len(self.data)
         return len(self.data)

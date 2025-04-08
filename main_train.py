@@ -27,26 +27,26 @@ def model_adjust(model, checkpoint):
 
 if __name__ == '__main__':
     torch.set_float32_matmul_precision('high')
-    # datamodule = ImageFolderDataModule(
-    #     batch_size=32, #32,
-    #     shuffle_all=False, # shuffle all images or keep shuffling in-city only
-    #     img_per_place=8,
-    #     sat_aug_per_place=5,
-    #     image_size=(322,322),
-    #     num_workers=8,
-    #     show_data_stats=True,
-    #     data_path='/data/qiaoq/Project/salad_tz/datasets/UAV_Large_Tilt_Angle/train/query_low_resolution',
-    #     val_set_names=['UAV_Large_Tilt_Angle/val/query'], # pitts30k_val, pitts30k_test, msls_val
-    # )
-    datamodule = SatelliteImageDataModule(
+    datamodule = ImageFolderDataModule(
         batch_size=32, #32,
-        image_size=(322,322),
-        patch_size=(500,500),
-        num_places=100000,
+        shuffle_all=False, # shuffle all images or keep shuffling in-city only
+        img_per_place=8,
         sat_aug_per_place=5,
+        image_size=(322,322),
         num_workers=8,
-        data_path='/data/qiaoq/Project/salad_tz/datasets/UAV_Large_Tilt_Angle/train/gallery',
+        show_data_stats=True,
+        data_path='/data/qiaoq/Project/salad_tz/datasets/UAV_Large_Tilt_Angle_label_finish/train/query',
+        val_set_names=['UAV_Large_Tilt_Angle/val/query'], # pitts30k_val, pitts30k_test, msls_val
     )
+    # datamodule = SatelliteImageDataModule(
+    #     batch_size=32, #32,
+    #     image_size=(322,322),
+    #     patch_size=(1200,1200),
+    #     num_places=10000,
+    #     sat_aug_per_place=5,
+    #     num_workers=8,
+    #     data_path='/data/qiaoq/Project/salad_tz/datasets/UAV_Large_Tilt_Angle_label_finish/train/gallery',
+    # )
 
     
     model = VPRModel(
@@ -112,15 +112,13 @@ if __name__ == '__main__':
         log_every_n_steps=1,
     )
 
-    pretrained_weight_path = './checkpoints/dino_salad.ckpt'
+    pretrained_weight_path = './checkpoints/tzb_model.ckpt'
     pretrained_state_dict = torch.load(pretrained_weight_path)
-    # ghost加入，需要调整模型结构
-    # pretrained_state_dict = model_adjust(model, pretrained_state_dict)
 
     model.load_state_dict(pretrained_state_dict)
     # we call the trainer, we give it the model and the datamodule
 
-    # model = torch.load('/data/qiaoq/Project/salad_tz/train_result/model/model6e-5-4epoch-pretain-10k.pth')
+    # model = torch.load('/data/qiaoq/Project/salad_tz/train_result/model/model6e-5-10epoch-1200-pretrain-label-finish.pth')
 
     trainer.fit(model=model, datamodule=datamodule)
-    torch.save(model, os.path.join('./train_result/model/', 'model6e-5-10epoch-pretain-100k-500size.pth'))
+    torch.save(model, os.path.join('./train_result/model/', 'model6e-5-10epoch-nosat_aug.pth'))

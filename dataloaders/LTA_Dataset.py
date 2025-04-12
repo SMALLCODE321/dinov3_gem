@@ -105,8 +105,7 @@ class ImageFolderDataset(Dataset):
         for i in range(self.sat_aug_per_place):
         # 对原图复制后分别进行随机仿射变换，产生不同的增强版本
             img_copy = sat_img.copy()
-            # aug_img = self.transform_sat(img_copy)  #消融实验
-            aug_img = self.transform_drone(img_copy)
+            aug_img = self.transform_sat(img_copy)  #消融实验
             imgs.append(aug_img)
 
         # 加载无人机视图，并应用预处理

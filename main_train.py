@@ -115,10 +115,10 @@ if __name__ == '__main__':
     pretrained_weight_path = './checkpoints/tzb_model.ckpt'
     pretrained_state_dict = torch.load(pretrained_weight_path)
 
-    model.load_state_dict(pretrained_state_dict)
+    model.load_state_dict(pretrained_state_dict, strict=False)
     # we call the trainer, we give it the model and the datamodule
 
     # model = torch.load('/data/qiaoq/Project/salad_tz/train_result/model/model6e-5-10epoch-1200-pretrain-label-finish.pth')
 
     trainer.fit(model=model, datamodule=datamodule)
-    torch.save(model, os.path.join('./train_result/model/', 'model6e-5-10epoch-nosat_aug.pth'))
+    torch.save(model, os.path.join('./train_result/model/', 'model6e-5-10epoch-Soft-MoE.pth'))

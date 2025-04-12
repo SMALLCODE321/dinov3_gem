@@ -47,10 +47,10 @@
             "console": "integratedTerminal",
             "args": [
                 "--val_path", "/data/qiaoq/Project/salad_tz/datasets/UAV_Large_Tilt_Angle_label_finish/val/query",
-                "--ckpt_path", "/data/qiaoq/Project/salad_tz/train_result/model/model6e-5-10epoch-1200-tzb+train.pth",
+                "--ckpt_path", "/data/qiaoq/Project/salad_tz/train_result/model/model6e-5-10epoch-label-finish.pth",
                 "--image_size", "322,322",
-                "--index_path", "./output_extractor/train_db_10epoch_tzb_train/faiss.index",
-                "--index_info_csv", "./output_extractor/train_db_10epoch_tzb_train/patches_index.csv"
+                "--index_path", "./output_extractor/train_db_10epoch_label_finish/faiss.index",
+                "--index_info_csv", "./output_extractor/train_db_10epoch_label_finish/patches_index.csv"
             ]
         },
         {

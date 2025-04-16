@@ -138,7 +138,7 @@ def parse_args():
                         help='worker 数量')
     parser.add_argument('--topk_index', type=int, default=5, 
                         help='FAISS 检索返回前 K 个候选 patch')
-    parser.add_argument('--iou_threshold', type=float, default=0.2, 
+    parser.add_argument('--iou_threshold', type=float, default=0.15, 
                         help='IoU 阈值，若 patch 与标注框 IoU 大于此值，认为匹配成功')
     args = parser.parse_args()
     return args 

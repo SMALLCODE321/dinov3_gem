@@ -105,20 +105,20 @@ if __name__ == '__main__':
         num_nodes=1,
         num_sanity_val_steps=0, # runs a validation step before stating training
         precision='16-mixed', # we use half precision to reduce  memory usage
-        max_epochs=2,
+        max_epochs=15,
         check_val_every_n_epoch=100, # run validation every epoch
         callbacks=[checkpoint_cb],# we only run the checkpointing callback (you can add more)
         reload_dataloaders_every_n_epochs=1, # we reload the dataset to shuffle the order
         log_every_n_steps=1,
     )
 
-    # pretrained_weight_path = './checkpoints/dino_salad.ckpt'
-    # pretrained_state_dict = torch.load(pretrained_weight_path)
+    pretrained_weight_path = './checkpoints/dino_salad.ckpt'
+    pretrained_state_dict = torch.load(pretrained_weight_path)
 
-    # model.load_state_dict(pretrained_state_dict, strict=False)
+    model.load_state_dict(pretrained_state_dict, strict=False)
     # we call the trainer, we give it the model and the datamodule
 
-    model = torch.load('/data/qiaoq/Project/salad_tz/train_result/model/model6e-5-15epoch-burst.pth')
+    # model = torch.load('/data/qiaoq/Project/salad_tz/train_result/model/model6e-5-15epoch-burst.pth')
 
     trainer.fit(model=model, datamodule=datamodule)
-    torch.save(model, os.path.join('./train_result/model/', 'model6e-5-17epoch-burst.pth'))
+    torch.save(model, os.path.join('./train_result/model/', 'model6e-5-15epoch-burst3.pth'))

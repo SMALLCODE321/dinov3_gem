@@ -3,7 +3,7 @@ import torch
 import os
 from torch.utils.data.dataloader import DataLoader
 from torchvision import transforms as T
-from dataloaders.LTA_Dataset import ImageFolderDataset, ValDataset
+from dataloaders.LTA_Dataset import ImageFolderDataset, ValDataset, ImageFolderDataset_Ablation
 from prettytable import PrettyTable 
 from . import TZBDataset 
 
@@ -85,14 +85,15 @@ class ImageFolderDataModule(pl.LightningDataModule):
             #         print(
             #             f'Validation set {self.val_set_name} does not exist or has not been implemented yet')
             #         raise NotImplementedError
-            # if self.show_data_stats:
-            #     self.print_stats()
+            if self.show_data_stats:
+                self.print_stats()
 
     def reload(self):
         # 创建无人机数据数据集，对应每个地点直接加载对应的图像
         self.train_dataset = ImageFolderDataset(
             data_path=self.data_path,
             img_per_place = self.img_per_place,
+            # img_per_place= self.sat_aug_per_place+2,  #消融实验
             sat_aug_per_place = self.sat_aug_per_place,
             transform_sat=self.transform_sat,
             transform_drone=self.transform_drone

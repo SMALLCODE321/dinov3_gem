@@ -192,68 +192,68 @@ class VPRModel(pl.LightningModule):
     # For validation, we will also iterate step by step over the validation set
     # this is the way Pytorch Lghtning is made. All about modularity, folks.
     #TODO
-    # def validation_step(self, batch, batch_idx, dataloader_idx=0):
-    #     places, _ = batch
-    #     descriptors = self(places)
-    #     # Ensure val_outputs has enough sublists to handle multiple dataloaders
-    #     self.val_outputs[dataloader_idx].append(descriptors.detach().cpu())
-    #     return descriptors.detach().cpu()
+    def validation_step(self, batch, batch_idx, dataloader_idx=0):
+        places, _ = batch
+        descriptors = self(places)
+        # Ensure val_outputs has enough sublists to handle multiple dataloaders
+        self.val_outputs[dataloader_idx].append(descriptors.detach().cpu())
+        return descriptors.detach().cpu()
     
-    # def on_validation_epoch_start(self):
-    #     # reset the outputs list
-    #     self.val_outputs = [[] for _ in range(len(self.trainer.datamodule.val_datasets))]
+    def on_validation_epoch_start(self):
+        # reset the outputs list
+        self.val_outputs = [[] for _ in range(len(self.trainer.datamodule.val_datasets))]
     
-    # def on_validation_epoch_end(self):
-    #     """this return descriptors in their order
-    #     depending on how the validation dataset is implemented 
-    #     for this project (MSLS val, Pittburg val), it is always references then queries
-    #     [R1, R2, ..., Rn, Q1, Q2, ...]
-    #     """
-    #     val_step_outputs = self.val_outputs
+    def on_validation_epoch_end(self):
+        """this return descriptors in their order
+        depending on how the validation dataset is implemented 
+        for this project (MSLS val, Pittburg val), it is always references then queries
+        [R1, R2, ..., Rn, Q1, Q2, ...]
+        """
+        val_step_outputs = self.val_outputs
 
-    #     dm = self.trainer.datamodule
-    #     # The following line is a hack: if we have only one validation set, then
-    #     # we need to put the outputs in a list (Pytorch Lightning does not do it presently)
-    #     if len(dm.val_datasets)==1: # we need to put the outputs in a list
-    #         val_step_outputs = [val_step_outputs]
+        dm = self.trainer.datamodule
+        # The following line is a hack: if we have only one validation set, then
+        # we need to put the outputs in a list (Pytorch Lightning does not do it presently)
+        if len(dm.val_datasets)==1: # we need to put the outputs in a list
+            val_step_outputs = [val_step_outputs]
         
-    #     for i, (val_set_name, val_dataset) in enumerate(zip(dm.val_set_names, dm.val_datasets)):
-    #         if len(dm.val_datasets)==1: 
-    #             feats = torch.concat(val_step_outputs[i][0], dim=0)
-    #         else:
-    #             feats = torch.concat(val_step_outputs[i], dim=0)
+        for i, (val_set_name, val_dataset) in enumerate(zip(dm.val_set_names, dm.val_datasets)):
+            if len(dm.val_datasets)==1: 
+                feats = torch.concat(val_step_outputs[i][0], dim=0)
+            else:
+                feats = torch.concat(val_step_outputs[i], dim=0)
                 
-    #         if 'pitts' in val_set_name:
-    #             # split to ref and queries
-    #             num_references = val_dataset.dbStruct.numDb
-    #             positives = val_dataset.getPositives()
-    #         elif 'msls' or 'tzb' in val_set_name:
-    #             # split to ref and queries
-    #             num_references = val_dataset.num_references
-    #             positives = val_dataset.pIdx
-    #         elif 'LTA' in val_set_name:
-    #             print("#TODO")
-    #         else:
-    #             print(f'Please implement validation_epoch_end for {val_set_name}')
-    #             raise NotImplemented 
+            if 'pitts' in val_set_name:
+                # split to ref and queries
+                num_references = val_dataset.dbStruct.numDb
+                positives = val_dataset.getPositives()
+            elif 'msls' or 'tzb' in val_set_name:
+                # split to ref and queries
+                num_references = val_dataset.num_references
+                positives = val_dataset.pIdx
+            elif 'LTA' in val_set_name:
+                print("#TODO")
+            else:
+                print(f'Please implement validation_epoch_end for {val_set_name}')
+                raise NotImplemented 
             
-    #         r_list = feats[ : num_references]
-    #         q_list = feats[num_references : ]
-    #         pitts_dict = utils.get_validation_recalls(
-    #             r_list=r_list, 
-    #             q_list=q_list,
-    #             k_values=[1, 5, 10, 15, 20, 50, 100],
-    #             gt=positives,
-    #             print_results=True,
-    #             dataset_name=val_set_name,
-    #             faiss_gpu=self.faiss_gpu
-    #         )
-    #         del r_list, q_list, feats, num_references, positives
+            r_list = feats[ : num_references]
+            q_list = feats[num_references : ]
+            pitts_dict = utils.get_validation_recalls(
+                r_list=r_list, 
+                q_list=q_list,
+                k_values=[1, 5, 10, 15, 20, 50, 100],
+                gt=positives,
+                print_results=True,
+                dataset_name=val_set_name,
+                faiss_gpu=self.faiss_gpu
+            )
+            del r_list, q_list, feats, num_references, positives
 
-    #         self.log(f'{val_set_name}/R1', pitts_dict[1], prog_bar=False, logger=True)
-    #         self.log(f'{val_set_name}/R5', pitts_dict[5], prog_bar=False, logger=True)
-    #         self.log(f'{val_set_name}/R10', pitts_dict[10], prog_bar=False, logger=True)
-    #     print('\n\n')
+            self.log(f'{val_set_name}/R1', pitts_dict[1], prog_bar=False, logger=True)
+            self.log(f'{val_set_name}/R5', pitts_dict[5], prog_bar=False, logger=True)
+            self.log(f'{val_set_name}/R10', pitts_dict[10], prog_bar=False, logger=True)
+        print('\n\n')
 
-    #     # reset the outputs list
-    #     self.val_outputs = []
+        # reset the outputs list
+        self.val_outputs = []

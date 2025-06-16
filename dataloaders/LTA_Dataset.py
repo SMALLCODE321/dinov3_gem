@@ -141,6 +141,107 @@ class ImageFolderDataset(Dataset):
             print(f'Image {path} could not be loaded')
             return Image.new('RGB', (224, 224))
         
+class ImageFolderDataset_Ablation(Dataset):
+    def __init__(self,
+                 data_path=None, # 数据集存放路径
+                 img_per_place=8,
+                 sat_aug_per_place=5,
+                 transform_sat=None,
+                 transform_drone=None     # 图像预处理变换
+                 ):
+        super(ImageFolderDataset_Ablation, self).__init__()
+        self.data_path = data_path 
+        self.img_per_place = img_per_place
+        self.sat_aug_per_place = sat_aug_per_place
+        self.transform_sat = transform_sat
+        self.transform_drone = transform_drone        
+        # 构造每个place的文件信息字典
+        self.places_ids, self.total_images = self.__getdataframes()
+    
+    def __getdataframes(self):
+        place_ids = {}
+        total_images = 0
+        valid_place_idx = 0
+        if os.path.isdir(self.data_path):
+            subfolders = sorted(os.listdir(self.data_path))
+            for subfolder in subfolders:
+                subfolder_path = os.path.join(self.data_path, subfolder)
+                if not os.path.isdir(subfolder_path):
+                    continue
+                # 收集所有图片
+                all_images = []
+                for ext in ("*.jpg", "*.jpeg", "*.png", "*.bmp"):
+                    all_images.extend(glob.glob(os.path.join(subfolder_path, ext)))
+                if not all_images:
+                    continue
+                all_images = sorted(all_images)
+                
+                # 按前缀分组
+                groups = {}
+                for img in all_images:
+                    base = os.path.basename(img)
+                    parts = base.split("-")
+                    if len(parts) < 2:
+                        continue
+                    place_key = parts[0]
+                    groups.setdefault(place_key, []).append(img)
+
+                for key, group_images in groups.items():
+                    satellite_imgs = [img for img in group_images if img.lower().endswith("-0.jpg")]
+                    if not satellite_imgs:
+                        continue
+                    satellite_img = satellite_imgs[0]
+                    uav_imgs = [img for img in group_images 
+                                if any(sub in img.lower() for sub in ["-70.jpg","-75.jpg","-80.jpg","-82.jpg","-85.jpg"])]
+                    if not uav_imgs:
+                        continue
+                    place_ids[valid_place_idx] = {
+                        "satellite": satellite_img, 
+                        "uav": uav_imgs,
+                        "label": valid_place_idx
+                    }
+                    total_images += 1 + len(uav_imgs)
+                    valid_place_idx += 1
+        else:
+            raise NotImplementedError("data_path 应为包含各个子文件夹的目录。")
+        return place_ids, total_images
+    
+    def __getitem__(self, index):
+        entry = self.places_ids[index]
+        sat_img_path = entry["satellite"]
+        uav_img_paths = entry["uav"]
+        
+        sat_img = self.image_loader(sat_img_path)
+        sat_base = self.transform_drone(sat_img) if self.transform_drone else sat_img
+        
+        aug_sats = []
+        for i in range(self.sat_aug_per_place):
+            img_copy = sat_img.copy()
+            aug_img = self.transform_sat(img_copy) if self.transform_sat else img_copy
+            aug_sats.append(aug_img)
+        
+        selected_uav_path = random.choice(uav_img_paths)
+        uav_img = self.image_loader(selected_uav_path)
+        uav_img = self.transform_drone(uav_img) if self.transform_drone else uav_img
+        
+        final_imgs = [sat_base] + aug_sats + [uav_img]
+    
+        
+        stacked = torch.stack(final_imgs, dim=0)
+        label = torch.tensor(entry["label"]).repeat(len(final_imgs))
+        return stacked, label
+    
+    def __len__(self):
+        return len(self.places_ids)
+
+    @staticmethod
+    def image_loader(path):
+        try:
+            return Image.open(path).convert('RGB')
+        except UnidentifiedImageError:
+            print(f'Image {path} could not be loaded, return blank.')
+            return Image.new('RGB', (224, 224))
+
 
 class ValDataset(Dataset):
     def __init__(self, im_path='', image_size=None, mean_std=IMAGENET_MEAN_STD):

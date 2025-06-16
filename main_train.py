@@ -3,6 +3,7 @@ import torch
 from vpr_model import VPRModel
 from dataloaders.LTA_Dataloader import ImageFolderDataModule
 from dataloaders.LTA_pretrain_Dataloader import SatelliteImageDataModule
+from dataloaders.patch_Dataloader import PatchImageDataModule
 import os
 
 def model_adjust(model, checkpoint):
@@ -27,28 +28,34 @@ def model_adjust(model, checkpoint):
 
 if __name__ == '__main__':
     torch.set_float32_matmul_precision('high')
-    datamodule = ImageFolderDataModule(
-        batch_size=32, #32,
-        shuffle_all=False, # shuffle all images or keep shuffling in-city only
-        img_per_place=8,
-        sat_aug_per_place=5,
-        image_size=(322,322),
-        num_workers=8,
-        show_data_stats=True,
-        data_path='/data/qiaoq/Project/salad_tz/datasets/UAV_Large_Tilt_Angle_label_finish/train/query',
-        val_set_names=['UAV_Large_Tilt_Angle/val/query'], # pitts30k_val, pitts30k_test, msls_val
-    )
+    # datamodule = ImageFolderDataModule(
+    #     batch_size=32, #32,
+    #     shuffle_all=False, # shuffle all images or keep shuffling in-city only
+    #     img_per_place=8,
+    #     sat_aug_per_place=5,
+    #     image_size=(322,322),
+    #     num_workers=8,
+    #     show_data_stats=True,
+    #     data_path='/data/qiaoq/Project/salad_tz/datasets/LTA/train/query',
+    #     val_set_names=['UAV_Large_Tilt_Angle/val/query'], # pitts30k_val, pitts30k_test, msls_val
+    # )
     # datamodule = SatelliteImageDataModule(
     #     batch_size=32, #32,
     #     image_size=(322,322),
-    #     patch_size=(1200,1200),
+    #     patch_size=(400,400),
     #     num_places=10000,
     #     sat_aug_per_place=5,
     #     num_workers=8,
     #     data_path='/data/qiaoq/Project/salad_tz/datasets/UAV_Large_Tilt_Angle_label_finish/train/gallery',
     # )
+    datamodule = PatchImageDataModule(
+                root_dir='/data/qiaoq/Project/salad_tz/datasets/SUES-200-512x512/Training/200',
+                val_path='/data/qiaoq/Project/salad_tz/datasets/SUES-200-512x512/Testing/200',
+                batch_size=4,
+                image_size=(322, 322),
+                num_workers=8,
+    )
 
-    
     model = VPRModel(
         #---- Encoder
         backbone_arch='dinov2_vitb14',
@@ -64,7 +71,7 @@ if __name__ == '__main__':
             'cluster_dim': 128,
             'token_dim': 256,
         },
-        lr = 6e-5,#普通的salad是6e-5,#对于tzb是1e-6
+        lr = 7.5e-5,#普通的salad是6e-5,#对于tzb是1e-6
         optimizer='adamw',
         weight_decay=9.5e-9, # 0.001 for sgd and 0 for adam,
         momentum=0.9,
@@ -72,7 +79,7 @@ if __name__ == '__main__':
         lr_sched_args = {
             'start_factor': 1,
             'end_factor': 0.2,
-            'total_iters': 1200,# 980/60 * max_epochs = 17*max_epochs
+            'total_iters': 1200, # place_num / batchsize * max_epochs
         },
 
         #----- Loss functions
@@ -105,7 +112,7 @@ if __name__ == '__main__':
         num_nodes=1,
         num_sanity_val_steps=0, # runs a validation step before stating training
         precision='16-mixed', # we use half precision to reduce  memory usage
-        max_epochs=15,
+        max_epochs=7,
         check_val_every_n_epoch=100, # run validation every epoch
         callbacks=[checkpoint_cb],# we only run the checkpointing callback (you can add more)
         reload_dataloaders_every_n_epochs=1, # we reload the dataset to shuffle the order
@@ -121,4 +128,4 @@ if __name__ == '__main__':
     # model = torch.load('/data/qiaoq/Project/salad_tz/train_result/model/model6e-5-15epoch-burst.pth')
 
     trainer.fit(model=model, datamodule=datamodule)
-    torch.save(model, os.path.join('./train_result/model/', 'model6e-5-15epoch-burst3.pth'))
+    torch.save(model, os.path.join('./train_result/model/', 'SUES-200-salad-7.5e-5-7epoch.pth'))

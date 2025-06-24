@@ -9,30 +9,78 @@ from torchvision import transforms
 from PIL import Image
 from vpr_model import VPRModel  # 请确保你的模型接口是 model(img) -> descriptor
 import torch.nn.functional as F
+import gc
+
+# -------------------------------------------------------------------
+# 评测相关函数：compute_mAP + eval_query
+# -------------------------------------------------------------------
+def compute_mAP_cmc(index, good_index, junk_index):
+    """
+    输入：
+      index      -- 排序后的 gallery 下标数组，shape (G,)
+      good_index -- 正例下标数组，shape (ngood, )
+      junk_index -- 噪声下标数组，shape (njunk, )
+    返回：
+      ap  -- 一个 query 的 Average Precision (float)
+      cmc -- 该 query 的 CMC 向量，shape (G,) (0/1)
+    """
+    G = len(index)
+    cmc = np.zeros(G, dtype=int)
+
+    # 没有正例
+    if good_index.size == 0:
+        cmc[0] = -1
+        return 0.0, cmc
+
+    # 1. 去掉 junk
+    if junk_index.size > 0:
+        mask = ~np.in1d(index, junk_index)
+        index = index[mask]
+
+    # 2. 找到所有正例在排序中的位置
+    mask_good = np.in1d(index, good_index)
+    rows_good = np.where(mask_good)[0]  # e.g. [2, 7, 15]
+
+    # 3. 构造 CMC（first-hit 之后都算命中）
+    first_hit = rows_good[0]
+    cmc[first_hit:] = 1
+
+    # 4. 计算 AP（插值法）
+    ngood = good_index.size
+    ap = 0.0
+    for i in range(ngood):
+        d_recall = 1.0 / ngood
+        precision_i = (i + 1) / (rows_good[i] + 1)
+        if rows_good[i] != 0:
+            precision_prev = i / rows_good[i]
+        else:
+            precision_prev = 1.0
+        ap += d_recall * (precision_prev + precision_i) / 2.0
+
+    return ap, cmc
+
+def eval_query(query_desc, gallery_descs, q_id, gallery_ids):
+    """
+    针对单个 query 特征，返回 its AP & CMC
+    query_desc: np.array, (D,)
+    gallery_descs: np.array, (G, D)
+    q_id: int
+    gallery_ids: list[int] 长度 G
+    """
+    # 1. 计算相似度（内积）
+    scores = gallery_descs.dot(query_desc)       # (G,)
+    index = np.argsort(scores)[::-1]             # 从大到小
+
+    gl = np.array(gallery_ids)
+    good_index = np.argwhere(gl == q_id).flatten()
+    junk_index = np.argwhere(gl == -1).flatten()  # 如果没有 -1，则返回空
+
+    return compute_mAP_cmc(index, good_index, junk_index)
 
 # -------------------------------------------------------------------
 # 通用工具
 # -------------------------------------------------------------------
-def average_precision(ranked_relevance):
-    """
-    计算单个 query 的 Average Precision (AP)
-    ranked_relevance: 按相似度排序后的二值列表（1 表示正例，0 表示负例）
-    """
-    num_relevant = sum(ranked_relevance)
-    if num_relevant == 0:
-        return 0.0
-    ap = 0.0
-    correct = 0
-    for i, rel in enumerate(ranked_relevance):
-        if rel:
-            correct += 1
-            ap += correct / (i + 1)
-    return ap / num_relevant
-
 def load_model(ckpt_path, device):
-    """
-    加载模型权重并切到 eval 模式
-    """
     if not os.path.exists(ckpt_path):
         raise FileNotFoundError(f"Checkpoint not found: {ckpt_path}")
     model = torch.load(ckpt_path, map_location=device)
@@ -45,10 +93,6 @@ def load_model(ckpt_path, device):
 # 特征提取与 FAISS 构建
 # -------------------------------------------------------------------
 def extract_descriptors(image_paths, model, device, input_transform, batch_size=32):
-    """
-    批量读取 image_paths，输出 descriptors (N, D) 及对应的原始 id 列表。
-    id_fn(image_path) 应返回该图对应的整数 id（如 文件名 '123.jpg' -> 123）。
-    """
     descriptors = []
     ids = []
     model_dtype = torch.float16 if device.startswith('cuda') else torch.float32
@@ -58,7 +102,7 @@ def extract_descriptors(image_paths, model, device, input_transform, batch_size=
         return int(parent)
 
     with torch.no_grad():
-        for i in tqdm(range(0, len(image_paths), batch_size), desc="Extracting gallery/query"):
+        for i in tqdm(range(0, len(image_paths), batch_size), desc="Extracting"):
             batch_paths = image_paths[i:i+batch_size]
             imgs = []
             for p in batch_paths:
@@ -67,17 +111,13 @@ def extract_descriptors(image_paths, model, device, input_transform, batch_size=
                 ids.append(id_from_path(p))
             x = torch.stack(imgs, dim=0).to(device)
             with torch.autocast(device_type=device.split(':')[0], dtype=model_dtype):
-                feats = model(x)  # (B, D)
-                # 如果模型不归一化向量，需要自行归一：
+                feats = model(x)               # (B, D)
                 feats = F.normalize(feats, dim=1, p=2)
             descriptors.append(feats.cpu().float())
     descriptors = torch.cat(descriptors, dim=0).numpy()
     return descriptors, ids
 
 def build_faiss_index(descriptors, use_gpu=False):
-    """
-    使用 L2 距离构建一个 Flat 索引
-    """
     d = descriptors.shape[1]
     index = faiss.IndexFlatL2(d)
     if use_gpu:
@@ -91,15 +131,13 @@ def build_faiss_index(descriptors, use_gpu=False):
 # -------------------------------------------------------------------
 def parse_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--gallery_path", type=str, default='/data/qiaoq/Project/salad_tz/datasets/SUES-200-512x512/Testing/150/gallery_satellite',
+    parser.add_argument("--gallery_path", type=str, default='/data/qiaoq/Project/salad_tz/datasets/University-1652/test/gallery_drone',
                         help="卫星图 patch 目录，文件命名：1.jpg, 2.jpg, ...")
-    parser.add_argument("--query_path", type=str, default='/data/qiaoq/Project/salad_tz/datasets/SUES-200-512x512/Testing/150/query_drone' ,
+    parser.add_argument("--query_path", type=str, default='/data/qiaoq/Project/salad_tz/datasets/University-1652/test/query_satellite',
                         help="UAV 图目录，内部若干子文件夹，子文件夹名对应 patch 编号")
-    parser.add_argument("--ckpt_path", type=str, default='/data/qiaoq/Project/salad_tz/train_result/model/model6e-5-15epoch-final.pth',
+    parser.add_argument("--ckpt_path", type=str, default='/data/qiaoq/Project/salad_tz/train_result/model/University-6e-5-dino-salad-10epoch.pth',
                         help="全局特征模型 checkpoint")
-    parser.add_argument("--topk", type=int, default=5,
-                        help="检索前 K")
-    parser.add_argument("--batch_size", type=int, default=4)
+    parser.add_argument("--batch_size", type=int, default=32)
     parser.add_argument("--use_gpu_index", action="store_true",
                         help="是否将 FAISS 索引放到 GPU上")
     args = parser.parse_args()
@@ -109,108 +147,89 @@ def main():
     args = parse_args()
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
-    # 1. 构造输入变换
+    # 1. 输入变换
     input_transform = transforms.Compose([
         transforms.Resize((322, 322)),
         transforms.ToTensor(),
-        transforms.Normalize(mean=[0.485, 0.456, 0.406],
-                             std=[0.229, 0.224, 0.225])
+        transforms.Normalize(mean=[0.485,0.456,0.406],
+                             std =[0.229,0.224,0.225])
     ])
 
     # 2. 加载模型
     model = load_model(args.ckpt_path, device)
 
-    # -------------------------------------------------------------------
-    # 3. 处理 Gallery（卫星 patch）
-    # -------------------------------------------------------------------
-    #University-1652
+    # 3. Gallery 特征
     gallery_paths = []
-    exts = ("*.jpg", "*.jpeg", "*.png", "*.bmp")
     for sub in os.listdir(args.gallery_path):
         subdir = os.path.join(args.gallery_path, sub)
-        if not os.path.isdir(subdir):
-            continue
-        for e in exts:
-            gallery_paths += glob.glob(os.path.join(subdir, e))   #如果是仿射变换，这块是args.gallery_path
-    print(f"[Gallery] found {len(gallery_paths)} patches.")
+        if not os.path.isdir(subdir): continue
+        for ext in ("*.jpg","*.jpeg","*.png","*.bmp"):
+            gallery_paths += glob.glob(os.path.join(subdir, ext))
+    print(f"[Gallery] found {len(gallery_paths)} images.")
     gallery_descs, gallery_ids = extract_descriptors(
         gallery_paths, model, device, input_transform, batch_size=args.batch_size
     )
 
-    # 4. 构建 FAISS 索引
+    # 4. FAISS 索引
     print("[FAISS] building index ...")
     index = build_faiss_index(gallery_descs, use_gpu=args.use_gpu_index)
-    print(f"[FAISS] index size: {index.ntotal}")
+    G = len(gallery_ids)
+    print(f"[FAISS] index size: {G}")
 
-    # -------------------------------------------------------------------
-    # 5. 处理 Query（UAV 图）
-    # -------------------------------------------------------------------
-    # 扫描每个子文件夹，收集所有 query 图及其对应的真值 id
-    query_image_paths = []
-    query_ids = []
-    exts = ("*.jpg", "*.jpeg", "*.png", "*.bmp")
+    # 5. Query 特征
+    query_paths, query_ids = [], []
     for sub in sorted(os.listdir(args.query_path)):
         subdir = os.path.join(args.query_path, sub)
-        if not os.path.isdir(subdir):
-            continue
+        if not os.path.isdir(subdir): continue
         try:
-            true_id = int(sub)
+            qid = int(sub)
         except:
             continue
-        imgs = glob.glob(os.path.join(subdir, "*.jpg"))
-        for p in imgs:
-            query_image_paths.append(p)
-            query_ids.append(true_id)
-    print(f"[Query] found {len(query_image_paths)} images across {len(set(query_ids))} folders.")
-
+        for ext in ("*.jpg", "*.jpeg", "*.png", "*.bmp"):
+            for imgf in glob.glob(os.path.join(subdir, ext)):
+                query_paths.append(imgf)
+                query_ids.append(qid)
+    print(f"[Query] found {len(query_paths)} images across {len(set(query_ids))} ids.")
     query_descs, _ = extract_descriptors(
-        query_image_paths, model, device, input_transform, batch_size=args.batch_size
+        query_paths, model, device, input_transform, batch_size=args.batch_size
     )
+    Q = len(query_ids)
 
-    # -------------------------------------------------------------------
-    # 6. 在 FAISS 上检索
-    # -------------------------------------------------------------------
-    topk = args.topk
-    print(f"[Search] running top-{topk} search for {len(query_descs)} queries ...")
-    D, I = index.search(query_descs, topk)  # I: (nq, topk) 的索引到 gallery_descs
+    # 6. 对每个 query 完整排序并累加 CMC / AP
+    cmc_sum = np.zeros(G, dtype=int)
+    ap_sum  = 0.0
 
-    # -------------------------------------------------------------------
-    # 7. 计算 Recall@1/3/5 和 mAP
-    # -------------------------------------------------------------------
-    recall_counts = {1: 0, 3: 0, 5: 0}
-    ap_list = []
-    nq = len(query_ids)
+    print("[Eval] computing CMC and mAP on full gallery ...")
+    for qi in tqdm(range(Q)):
+        q_desc = query_descs[qi]
+        q_id   = query_ids[qi]
+        ap, cmc = eval_query(q_desc, gallery_descs, q_id, gallery_ids)
+        if cmc[0] == -1:
+            continue  # 跳过无正例的 query
+        cmc_sum += cmc
+        ap_sum  += ap
 
-    for qi in range(nq):
-        true_id = query_ids[qi]
-        retrieved_ids = [gallery_ids[idx] for idx in I[qi]]
-        # 构造二值相关性列表
-        rel = [1 if rid == true_id else 0 for rid in retrieved_ids]
-        # Recall@K
-        for k in recall_counts:
-            if sum(rel[:k]) > 0:
-                recall_counts[k] += 1
-        # AP
-        ap_list.append(average_precision(rel))
+    # 7. 归一化并输出
+    cmc_avg = cmc_sum.astype(float) / Q      # 平均 CMC
+    mAP     = ap_sum / Q * 100                # 百分制
 
-    recall1 = recall_counts[1] / nq
-    recall3 = recall_counts[3] / nq
-    recall5 = recall_counts[5] / nq
-    mAP = np.mean(ap_list)
-
-    # -------------------------------------------------------------------
-    # 8. 输出
-    # -------------------------------------------------------------------
+    # 常见 Recall@1/3/5
     out = []
-    out.append(f"Number of queries: {nq}")
-    out.append(f"Recall@1: {recall1:.4f}")
-    out.append(f"Recall@3: {recall3:.4f}")
-    out.append(f"Recall@5: {recall5:.4f}")
+    for k in (1,3,5):
+        out.append(f"Recall@{k}: {cmc_avg[k-1]*100:.4f}")
+    # top 1%
+    top1 = round(G * 0.01)
+    out.append(f"Recall@top1%({top1}): {cmc_avg[top1]*100:.4f}")
     out.append(f"mAP: {mAP:.4f}")
-    result_str = "\n".join(out)
 
     print("\n===== Evaluation Results =====")
-    print(result_str)
+    print("\n".join(out))
+
+    # 清理
+    del gallery_descs, gallery_ids, query_descs, query_ids
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
 
 if __name__ == "__main__":
     main()

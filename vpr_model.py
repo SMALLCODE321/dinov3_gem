@@ -1,10 +1,27 @@
 import pytorch_lightning as pl
 import torch
 from torch.optim import lr_scheduler, optimizer
-
+import numpy as np
+import torch.nn.functional as F
 import utils
 from models import helper
+from vpr_eval import VPREvaluator
 
+def average_precision(ranked_relevance):
+    """
+    计算单个 query 的 Average Precision (AP)
+    ranked_relevance: 按相似度排序后的二值列表（1 表示正例，0 表示负例）
+    """
+    num_relevant = sum(ranked_relevance)
+    if num_relevant == 0:
+        return 0.0
+    ap = 0.0
+    correct = 0
+    for i, rel in enumerate(ranked_relevance):
+        if rel:
+            correct += 1
+            ap += correct / (i + 1)
+    return ap / num_relevant
 
 class VPRModel(pl.LightningModule):
     """This is the main model for Visual Place Recognition
@@ -189,71 +206,160 @@ class VPRModel(pl.LightningModule):
         # we empty the batch_acc list for next epoch
         self.batch_acc = []
 
+        self.eval()
+        evaluator = VPREvaluator(
+            model=self,
+            gallery_path="/data/qiaoq/Project/salad_tz/datasets/University-1652/test/gallery_satellite",
+            query_path="/data/qiaoq/Project/salad_tz/datasets/University-1652/test/query_drone",
+            batch_size=32,
+        )
+        stats = evaluator.evaluate()
+
     # For validation, we will also iterate step by step over the validation set
     # this is the way Pytorch Lghtning is made. All about modularity, folks.
-    #TODO
-    def validation_step(self, batch, batch_idx, dataloader_idx=0):
-        places, _ = batch
-        descriptors = self(places)
-        # Ensure val_outputs has enough sublists to handle multiple dataloaders
-        self.val_outputs[dataloader_idx].append(descriptors.detach().cpu())
-        return descriptors.detach().cpu()
-    
-    def on_validation_epoch_start(self):
-        # reset the outputs list
-        self.val_outputs = [[] for _ in range(len(self.trainer.datamodule.val_datasets))]
-    
-    def on_validation_epoch_end(self):
-        """this return descriptors in their order
-        depending on how the validation dataset is implemented 
-        for this project (MSLS val, Pittburg val), it is always references then queries
-        [R1, R2, ..., Rn, Q1, Q2, ...]
+    def on_validation_start(self) -> None:
         """
-        val_step_outputs = self.val_outputs
+        在 validation 开始时初始化容器。支持多个 val dataloader。
+        """
+        num_val = len(self.trainer.val_dataloaders)
+        # 为每个 dataloader 都准备一个字典来存 feats/labels
+        self._val_buffer = [
+            {'ref_feats': [], 'ref_lbl': [], 'query_feats': [], 'query_lbl': []}
+            for _ in range(num_val)
+        ]
 
+    def validation_step(self, batch, batch_idx, dataloader_idx=0):
+        """
+        batch: imgs (BS, 1+Q, C, H, W), labels (BS, 1+Q)
+        """
+        imgs, labels = batch
+        BS, M, C, H, W = imgs.shape
+        x = imgs.view(BS*M, C, H, W)
+        feats = self(x)                         # (BS*M, D)
+        feats = F.normalize(feats, p=2, dim=1)  # L2 归一
+        feats = feats.detach().cpu().view(BS, M, -1)
+        labs = labels.cpu().view(BS, M)
+
+        buf = self._val_buffer[dataloader_idx]
+        # 累积 reference
+        buf['ref_feats'].append(feats[:, 0, :])     # list of (BS, D)
+        buf['ref_lbl'].append(labs[:, 0])          # list of (BS,)
+        # 累积 queries
+        q_feats = feats[:, 1:, :].reshape(-1, feats.size(-1))  # (BS*(M-1), D)
+        q_lbl   = labs[:, 1:].reshape(-1)                      # (BS*(M-1),)
+        buf['query_feats'].append(q_feats)
+        buf['query_lbl'].append(q_lbl)
+
+    def on_validation_epoch_end(self) -> None:
+        """
+        把整个 epoch 的所有 batch 结果拼起来，计算 Recall@1/3/5 和 mAP 并 log。
+        """
         dm = self.trainer.datamodule
-        # The following line is a hack: if we have only one validation set, then
-        # we need to put the outputs in a list (Pytorch Lightning does not do it presently)
-        if len(dm.val_datasets)==1: # we need to put the outputs in a list
-            val_step_outputs = [val_step_outputs]
+        for idx, buf in enumerate(self._val_buffer):
+            # 拼接
+            ref_feats   = torch.cat(buf['ref_feats'],   dim=0).numpy()  # (nr, D)
+            query_feats = torch.cat(buf['query_feats'], dim=0).numpy()  # (nq, D)
+            ref_lbl     = torch.cat(buf['ref_lbl'],     dim=0).numpy()  # (nr,)
+            query_lbl   = torch.cat(buf['query_lbl'],   dim=0).numpy()  # (nq,)
+
+            # 计算相似度矩阵（内积即余弦相似度）
+            sims = query_feats @ ref_feats.T  # (nq, nr)
+            nq, nr = sims.shape
+
+            # Recall@K
+            rec = {}
+            for k in (1, 3, 5):
+                # 找到前 k 大的索引
+                topk_idxs = np.argpartition(-sims, kth=k-1, axis=1)[:, :k]  # (nq, k)
+                hits = []
+                for qi in range(nq):
+                    retrieved_lbls = ref_lbl[topk_idxs[qi]]
+                    hits.append((retrieved_lbls == query_lbl[qi]).any())
+                rec[k] = np.mean(hits)
+
+            # mAP
+            ap_list = []
+            for qi in range(nq):
+                order = np.argsort(-sims[qi])   # 按相似度降序
+                rel = (ref_lbl[order] == query_lbl[qi]).astype(int).tolist()
+                ap_list.append(average_precision(rel))
+            mAP = float(np.mean(ap_list))
+
+            # log & 打印
+            name = dm.val_set_names[idx]
+            for k, v in rec.items():
+                self.log(f"{name}/Recall@{k}", v, prog_bar=True, logger=True)
+            self.log(f"{name}/mAP", mAP, prog_bar=True, logger=True)
+
+            msg = " | ".join([f"R@{k} {rec[k]*100:.2f}%" for k in rec])
+            print(f"[Epoch {self.current_epoch}] {name} → {msg} | mAP {mAP*100:.2f}%")
+
+        # 清空 buffer
+        self._val_buffer = None
+
+    #TODO
+    # def validation_step(self, batch, batch_idx, dataloader_idx=0):
+    #     places, _ = batch
+    #     descriptors = self(places)
+    #     # Ensure val_outputs has enough sublists to handle multiple dataloaders
+    #     self.val_outputs[dataloader_idx].append(descriptors.detach().cpu())
+    #     return descriptors.detach().cpu()
+    
+    # def on_validation_epoch_start(self):
+    #     # reset the outputs list
+    #     self.val_outputs = [[] for _ in range(len(self.trainer.datamodule.val_datasets))]
+    
+    # def on_validation_epoch_end(self):
+    #     """this return descriptors in their order
+    #     depending on how the validation dataset is implemented 
+    #     for this project (MSLS val, Pittburg val), it is always references then queries
+    #     [R1, R2, ..., Rn, Q1, Q2, ...]
+    #     """
+    #     val_step_outputs = self.val_outputs
+
+    #     dm = self.trainer.datamodule
+    #     # The following line is a hack: if we have only one validation set, then
+    #     # we need to put the outputs in a list (Pytorch Lightning does not do it presently)
+    #     if len(dm.val_datasets)==1: # we need to put the outputs in a list
+    #         val_step_outputs = [val_step_outputs]
         
-        for i, (val_set_name, val_dataset) in enumerate(zip(dm.val_set_names, dm.val_datasets)):
-            if len(dm.val_datasets)==1: 
-                feats = torch.concat(val_step_outputs[i][0], dim=0)
-            else:
-                feats = torch.concat(val_step_outputs[i], dim=0)
+    #     for i, (val_set_name, val_dataset) in enumerate(zip(dm.val_set_names, dm.val_datasets)):
+    #         if len(dm.val_datasets)==1: 
+    #             feats = torch.concat(val_step_outputs[i][0], dim=0)
+    #         else:
+    #             feats = torch.concat(val_step_outputs[i], dim=0)
                 
-            if 'pitts' in val_set_name:
-                # split to ref and queries
-                num_references = val_dataset.dbStruct.numDb
-                positives = val_dataset.getPositives()
-            elif 'msls' or 'tzb' in val_set_name:
-                # split to ref and queries
-                num_references = val_dataset.num_references
-                positives = val_dataset.pIdx
-            elif 'LTA' in val_set_name:
-                print("#TODO")
-            else:
-                print(f'Please implement validation_epoch_end for {val_set_name}')
-                raise NotImplemented 
+    #         if 'pitts' in val_set_name:
+    #             # split to ref and queries
+    #             num_references = val_dataset.dbStruct.numDb
+    #             positives = val_dataset.getPositives()
+    #         elif 'msls' or 'tzb' in val_set_name:
+    #             # split to ref and queries
+    #             num_references = val_dataset.num_references
+    #             positives = val_dataset.pIdx
+    #         elif 'LTA' in val_set_name:
+    #             print("#TODO")
+    #         else:
+    #             print(f'Please implement validation_epoch_end for {val_set_name}')
+    #             raise NotImplemented 
             
-            r_list = feats[ : num_references]
-            q_list = feats[num_references : ]
-            pitts_dict = utils.get_validation_recalls(
-                r_list=r_list, 
-                q_list=q_list,
-                k_values=[1, 5, 10, 15, 20, 50, 100],
-                gt=positives,
-                print_results=True,
-                dataset_name=val_set_name,
-                faiss_gpu=self.faiss_gpu
-            )
-            del r_list, q_list, feats, num_references, positives
+    #         r_list = feats[ : num_references]
+    #         q_list = feats[num_references : ]
+    #         pitts_dict = utils.get_validation_recalls(
+    #             r_list=r_list, 
+    #             q_list=q_list,
+    #             k_values=[1, 5, 10, 15, 20, 50, 100],
+    #             gt=positives,
+    #             print_results=True,
+    #             dataset_name=val_set_name,
+    #             faiss_gpu=self.faiss_gpu
+    #         )
+    #         del r_list, q_list, feats, num_references, positives
 
-            self.log(f'{val_set_name}/R1', pitts_dict[1], prog_bar=False, logger=True)
-            self.log(f'{val_set_name}/R5', pitts_dict[5], prog_bar=False, logger=True)
-            self.log(f'{val_set_name}/R10', pitts_dict[10], prog_bar=False, logger=True)
-        print('\n\n')
+    #         self.log(f'{val_set_name}/R1', pitts_dict[1], prog_bar=False, logger=True)
+    #         self.log(f'{val_set_name}/R5', pitts_dict[5], prog_bar=False, logger=True)
+    #         self.log(f'{val_set_name}/R10', pitts_dict[10], prog_bar=False, logger=True)
+    #     print('\n\n')
 
-        # reset the outputs list
-        self.val_outputs = []
+    #     # reset the outputs list
+    #     self.val_outputs = []

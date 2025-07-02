@@ -6,6 +6,7 @@ import torch.nn.functional as F
 import utils
 from models import helper
 from vpr_eval import VPREvaluator
+from vpr_eval_GTA import GTAEvaluator
 
 def average_precision(ranked_relevance):
     """
@@ -207,11 +208,17 @@ class VPRModel(pl.LightningModule):
         self.batch_acc = []
 
         self.eval()
-        evaluator = VPREvaluator(
-            model=self,
-            gallery_path="/data/qiaoq/Project/salad_tz/datasets/University-1652/test/gallery_satellite",
-            query_path="/data/qiaoq/Project/salad_tz/datasets/University-1652/test/query_drone",
-            batch_size=32,
+        # evaluator = VPREvaluator(
+        #     model=self,
+        #     gallery_path="/data/qiaoq/Project/salad_tz/datasets/DenseUAV/test/gallery_satellite",
+        #     query_path="/data/qiaoq/Project/salad_tz/datasets/DenseUAV/test/query_drone",
+        #     batch_size=32,
+        # )
+        evaluator = GTAEvaluator(
+            model = self,
+            test_json = '/data/qiaoq/Project/salad_tz/datasets/GTA-UAV-LR/same-area-drone2sate-test.json',
+            root_dir = '/data/qiaoq/Project/salad_tz/datasets/GTA-UAV-LR',
+            batch_size = 32
         )
         stats = evaluator.evaluate()
 

@@ -135,7 +135,7 @@ def parse_args():
                         help="卫星图 patch 目录，文件命名：1.jpg, 2.jpg, ...")
     parser.add_argument("--query_path", type=str, default='/data/qiaoq/Project/salad_tz/datasets/University-1652/test/query_satellite',
                         help="UAV 图目录，内部若干子文件夹，子文件夹名对应 patch 编号")
-    parser.add_argument("--ckpt_path", type=str, default='/data/qiaoq/Project/salad_tz/train_result/model/University-6e-5-dino-salad-10epoch.pth',
+    parser.add_argument("--ckpt_path", type=str, default='/data/qiaoq/Project/salad_tz/train_result/model/SUES-300m-6e-5-20epoch.pth',
                         help="全局特征模型 checkpoint")
     parser.add_argument("--batch_size", type=int, default=32)
     parser.add_argument("--use_gpu_index", action="store_true",

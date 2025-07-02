@@ -4,7 +4,11 @@ from vpr_model import VPRModel
 from dataloaders.LTA_Dataloader import ImageFolderDataModule
 from dataloaders.LTA_pretrain_Dataloader import SatelliteImageDataModule
 from dataloaders.patch_Dataloader import PatchImageDataModule
+from dataloaders.GTA_Dataloader import GTAUAVDataModule
+from dataloaders.GTA_Dataloader1 import GTAUAVPlaceDataModule
 import os
+from vpr_eval_GTA import GTAEvaluator
+import math
 
 def model_adjust(model, checkpoint):
     
@@ -39,6 +43,8 @@ if __name__ == '__main__':
     #     data_path='/data/qiaoq/Project/salad_tz/datasets/LTA/train/query',
     #     val_set_names=['UAV_Large_Tilt_Angle/val/query'], # pitts30k_val, pitts30k_test, msls_val
     # )
+    
+    # 对卫星图切Patch，自监督学习
     # datamodule = SatelliteImageDataModule(
     #     batch_size=32, #32,
     #     image_size=(322,322),
@@ -48,16 +54,39 @@ if __name__ == '__main__':
     #     num_workers=8,
     #     data_path='/data/qiaoq/Project/salad_tz/datasets/UAV_Large_Tilt_Angle_label_finish/train/gallery',
     # )
-    datamodule = PatchImageDataModule(
-                train_satellite_path='/data/qiaoq/Project/salad_tz/datasets/University-1652/train/satellite',
-                train_drone_path='/data/qiaoq/Project/salad_tz/datasets/University-1652/train/drone',
-                val_set_names=['University-1652'],
-                num_queries=5,
-                num_augs=3,
-                batch_size=32,
-                image_size=(322, 322),
-                num_workers=8,
+    
+    # University-1652和SUES-200数据集Dataloader
+    # datamodule = PatchImageDataModule(
+    #             train_satellite_path='/data/qiaoq/Project/salad_tz/datasets/DenseUAV/train/satellite',
+    #             train_drone_path='/data/qiaoq/Project/salad_tz/datasets/DenseUAV/train/drone',
+    #             val_set_names=['University-1652'],
+    #             num_queries=3,
+    #             num_augs=5,
+    #             batch_size=32,
+    #             image_size=(322, 322),
+    #             num_workers=8,
+    # )
+
+    # GTAUAV数据集Dataloader
+    datamodule = GTAUAVDataModule(
+        json_path='/data/qiaoq/Project/salad_tz/datasets/GTA-UAV-LR/cross-area-drone2sate-train.json',
+        root_dir='/data/qiaoq/Project/salad_tz/datasets/GTA-UAV-LR',
+        batch_size=50,
+        num_workers=8,
+        num_augs=3,
+        image_size=(322, 322)
     )
+    # datamodule = GTAUAVPlaceDataModule(
+    #     json_path='/data/qiaoq/Project/salad_tz/datasets/GTA-UAV-LR/same-area-drone2sate-train.json',
+    #     root_dir='/data/qiaoq/Project/salad_tz/datasets/GTA-UAV-LR',
+    #     batch_size=20,
+    #     num_workers=8,
+    #     num_augs=3,
+    #     image_size=(322, 322),
+    #     max_drones_per_place=8
+    # )
+    # datamodule.setup()
+    # total_iters = math.ceil(len(datamodule.train_ds)/datamodule.batch_size)*20 # 20 epochs
 
     model = VPRModel(
         #---- Encoder
@@ -82,7 +111,7 @@ if __name__ == '__main__':
         lr_sched_args = {
             'start_factor': 1,
             'end_factor': 0.2,
-            'total_iters': (701 // 32) * 20, # place_num / batchsize * max_epochs  
+            'total_iters': (80466 // 50) * 20,  # place_num / batch_size * epochs
         },
 
         #----- Loss functions
@@ -93,18 +122,6 @@ if __name__ == '__main__':
         miner_margin=0.1,
         faiss_gpu=False
     )
-
-    # model params saving using Pytorch Lightning
-    # we save the best 3 models accoring to Recall@1 on pittsburg val
-    # checkpoint_cb = pl.callbacks.ModelCheckpoint(
-    #     monitor='University-1652/Recall@1',
-    #     filename=f'/data/qiaoq/Project/salad_tz/train_result/{model.encoder_arch}' + '_({epoch:02d})_R1[{/R1:.4f}]_R10[{/R10:.4f}]',
-    #     auto_insert_metric_name=False,
-    #     save_weights_only=False,
-    #     save_top_k=5,
-    #     save_last=True,
-    #     mode='max'
-    # )
 
     #------------------
     # we instanciate a trainer
@@ -125,17 +142,16 @@ if __name__ == '__main__':
     pretrained_weight_path = './checkpoints/dino_salad.ckpt'
     pretrained_state_dict = torch.load(pretrained_weight_path)
 
-    # model_state = model.state_dict()
-    # for k, v in pretrained_state_dict.items():
-    #     name = k.replace("module.", "")
-    #     if name in model_state and v.shape == model_state[name].shape:
-    #         model_state[name] = v
-    # model.load_state_dict(model_state)
-
     model.load_state_dict(pretrained_state_dict, strict=False)
     # we call the trainer, we give it the model and the datamodule
-
+    test = GTAEvaluator(
+        model=model,
+        test_json='/data/qiaoq/Project/salad_tz/datasets/GTA-UAV-LR/cross-area-drone2sate-test.json',
+        root_dir='/data/qiaoq/Project/salad_tz/datasets/GTA-UAV-LR',
+        batch_size=50,
+    )
+    test.evaluate()
     # model = torch.load('/data/qiaoq/Project/salad_tz/train_result/model/University-6e-5-10epoch.pth')
 
-    trainer.fit(model=model, datamodule=datamodule)
-    torch.save(model, os.path.join('./train_result/model/', 'University-6e-5-dino-salad-20epoch.pth'))
+    # trainer.fit(model=model, datamodule=datamodule)
+    # torch.save(model, os.path.join('./train_result/model/', 'Game4Loc-cross-6e-5-10epoch.pth'))

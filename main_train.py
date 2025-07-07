@@ -39,9 +39,7 @@ if __name__ == '__main__':
     #     sat_aug_per_place=5,
     #     image_size=(322,322),
     #     num_workers=8,
-    #     show_data_stats=True,
     #     data_path='/data/qiaoq/Project/salad_tz/datasets/LTA/train/query',
-    #     val_set_names=['UAV_Large_Tilt_Angle/val/query'], # pitts30k_val, pitts30k_test, msls_val
     # )
     
     # 对卫星图切Patch，自监督学习
@@ -55,29 +53,29 @@ if __name__ == '__main__':
     #     data_path='/data/qiaoq/Project/salad_tz/datasets/UAV_Large_Tilt_Angle_label_finish/train/gallery',
     # )
     
-    # University-1652和SUES-200数据集Dataloader
-    # datamodule = PatchImageDataModule(
-    #             train_satellite_path='/data/qiaoq/Project/salad_tz/datasets/DenseUAV/train/satellite',
-    #             train_drone_path='/data/qiaoq/Project/salad_tz/datasets/DenseUAV/train/drone',
-    #             val_set_names=['University-1652'],
-    #             num_queries=3,
-    #             num_augs=5,
-    #             batch_size=32,
-    #             image_size=(322, 322),
-    #             num_workers=8,
-    # )
+    # University-1652\SUES-200\DenseUAV数据集Dataloader
+    datamodule = PatchImageDataModule(
+                train_satellite_path='/data/qiaoq/Project/salad_tz/datasets/DenseUAV/train/satellite',
+                train_drone_path='/data/qiaoq/Project/salad_tz/datasets/DenseUAV/train/drone',
+                val_set_names=['University-1652'],
+                num_queries=3,
+                num_augs=5,
+                batch_size=32,
+                image_size=(322, 322),
+                num_workers=8,
+    )
 
     # GTAUAV数据集Dataloader
-    datamodule = GTAUAVDataModule(
-        json_path='/data/qiaoq/Project/salad_tz/datasets/GTA-UAV-LR/cross-area-drone2sate-train.json',
-        root_dir='/data/qiaoq/Project/salad_tz/datasets/GTA-UAV-LR',
-        batch_size=50,
-        num_workers=8,
-        num_augs=3,
-        image_size=(322, 322)
-    )
+    # datamodule = GTAUAVDataModule(
+    #     json_path='/data/qiaoq/Project/salad_tz/datasets/GTA-UAV-LR/cross-area-drone2sate-train.json',
+    #     root_dir='/data/qiaoq/Project/salad_tz/datasets/GTA-UAV-LR',
+    #     batch_size=50,
+    #     num_workers=8,
+    #     num_augs=3,
+    #     image_size=(322, 322)
+    # )
     # datamodule = GTAUAVPlaceDataModule(
-    #     json_path='/data/qiaoq/Project/salad_tz/datasets/GTA-UAV-LR/same-area-drone2sate-train.json',
+    #     json_path='/data/qiaoq/Project/salad_tz/datasets/GTA-UAV-LR/cross-area-drone2sate-train.json',
     #     root_dir='/data/qiaoq/Project/salad_tz/datasets/GTA-UAV-LR',
     #     batch_size=20,
     #     num_workers=8,
@@ -85,8 +83,6 @@ if __name__ == '__main__':
     #     image_size=(322, 322),
     #     max_drones_per_place=8
     # )
-    # datamodule.setup()
-    # total_iters = math.ceil(len(datamodule.train_ds)/datamodule.batch_size)*20 # 20 epochs
 
     model = VPRModel(
         #---- Encoder
@@ -111,7 +107,7 @@ if __name__ == '__main__':
         lr_sched_args = {
             'start_factor': 1,
             'end_factor': 0.2,
-            'total_iters': (80466 // 50) * 20,  # place_num / batch_size * epochs
+            'total_iters': (2256 // 32) * 20,  # place_num / batch_size * epochs
         },
 
         #----- Loss functions
@@ -144,14 +140,8 @@ if __name__ == '__main__':
 
     model.load_state_dict(pretrained_state_dict, strict=False)
     # we call the trainer, we give it the model and the datamodule
-    test = GTAEvaluator(
-        model=model,
-        test_json='/data/qiaoq/Project/salad_tz/datasets/GTA-UAV-LR/cross-area-drone2sate-test.json',
-        root_dir='/data/qiaoq/Project/salad_tz/datasets/GTA-UAV-LR',
-        batch_size=50,
-    )
-    test.evaluate()
+
     # model = torch.load('/data/qiaoq/Project/salad_tz/train_result/model/University-6e-5-10epoch.pth')
 
-    # trainer.fit(model=model, datamodule=datamodule)
-    # torch.save(model, os.path.join('./train_result/model/', 'Game4Loc-cross-6e-5-10epoch.pth'))
+    trainer.fit(model=model, datamodule=datamodule)
+    torch.save(model, os.path.join('./train_result/model/', 'DenseUAV-6e-5-20epoch.pth'))

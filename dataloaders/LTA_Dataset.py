@@ -45,49 +45,78 @@ class ImageFolderDataset(Dataset):
         place_ids = {}
         total_images = 0
         valid_place_idx = 0
-        if os.path.isdir(self.data_path):
-            # 遍历 data_path 下的所有子文件夹（例如 query 文件夹下的 "1", "2", "3", ...）
-            subfolders = sorted(os.listdir(self.data_path))
-            for subfolder in subfolders:
-                subfolder_path = os.path.join(self.data_path, subfolder)
-                if not os.path.isdir(subfolder_path):
-                    continue
-                # 获取当前子文件夹中所有图片文件
-                all_images = []
-                for ext in ("*.jpg", "*.jpeg", "*.png", "*.bmp"):
-                    all_images.extend(glob.glob(os.path.join(subfolder_path, ext)))
-                if not all_images:
-                    continue
-                all_images = sorted(all_images)
-                
-                # 根据文件名前缀（例如 "w1", "w2", ...）分组，每组即一个 place
-                groups = {}
-                for img in all_images:
-                    base = os.path.basename(img)
-                    parts = base.split("-")
-                    if len(parts) < 2:
-                        continue  # 文件名不符合预期格式则跳过
-                    place_key = parts[0]  # 例如 "w1"
-                    groups.setdefault(place_key, []).append(img)
 
-                # 对每个分组生成一个地点条目
-                for key, group_images in groups.items():
-                    # 筛选卫星图：文件名以“-0.jpg”结尾
-                    satellite_imgs = [img for img in group_images if img.lower().endswith("-0.jpg")]
-                    if not satellite_imgs:
-                        continue  # 如果该组没有卫星图则跳过
-                    satellite_img = satellite_imgs[0]
-                    # 筛选无人机视图：文件名包含“-70.jpg”,“-75.jpg”,“-80.jpg”,“-82.jpg”,“-85.jpg”
-                    uav_imgs = [img for img in group_images if any(sub in img.lower() for sub in ["-70.jpg", "-75.jpg", "-80.jpg", "-82.jpg", "-85.jpg"])]
-                    place_ids[valid_place_idx] = {
-                        "satellite": satellite_img, 
-                        "uav": uav_imgs,
-                        "label": valid_place_idx
-                        }
-                    total_images += 1 + len(uav_imgs)
-                    valid_place_idx += 1
-        else:
+        # 支持的图片后缀
+        allowed_exts = {'.jpg', '.jpeg', '.png', '.bmp'}
+        # 无人机视图后缀标志（不含文件扩展名）
+        uav_suffixes = ['-70', '-75', '-80', '-82', '-85']
+
+        if not os.path.isdir(self.data_path):
             raise NotImplementedError("data_path 应为包含各个子文件夹的目录。")
+
+        # 遍历各子文件夹
+        for subfolder in sorted(os.listdir(self.data_path)):
+            subfolder_path = os.path.join(self.data_path, subfolder)
+            if not os.path.isdir(subfolder_path):
+                continue
+
+            # 收集所有允许后缀的图片
+            all_images = []
+            for fname in os.listdir(subfolder_path):
+                fpath = os.path.join(subfolder_path, fname)
+                if not os.path.isfile(fpath):
+                    continue
+                ext = os.path.splitext(fname)[1].lower()
+                if ext in allowed_exts:
+                    all_images.append(fpath)
+
+            if not all_images:
+                continue
+
+            all_images.sort()
+
+            # 根据文件名前缀（如 "w1"）分组
+            groups = {}
+            for img in all_images:
+                base = os.path.basename(img)
+                # 只拆一次，防止文件名中出现多次 '-'
+                parts = base.split('-', 1)
+                if len(parts) < 2:
+                    continue
+                place_key = parts[0]
+                groups.setdefault(place_key, []).append(img)
+
+            # 处理每一组
+            for key, group_images in groups.items():
+                # 找到卫星图：文件名（不含扩展名）以 '-0' 结尾
+                satellite_imgs = []
+                for img in group_images:
+                    name_no_ext = os.path.splitext(os.path.basename(img))[0].lower()
+                    if name_no_ext.endswith('-0'):
+                        satellite_imgs.append(img)
+                if not satellite_imgs:
+                    continue
+                satellite_img = satellite_imgs[0]
+
+                # 找到无人机图：文件名（不含扩展名）以指定后缀结尾
+                uav_imgs = []
+                for img in group_images:
+                    name_no_ext = os.path.splitext(os.path.basename(img))[0].lower()
+                    if any(name_no_ext.endswith(suf) for suf in uav_suffixes):
+                        uav_imgs.append(img)
+
+                if len(uav_imgs) < 3:
+                    print(f"Warning: Place {img} has less than 3 UAV images, skipping.")
+
+                # 记录有效地点
+                place_ids[valid_place_idx] = {
+                    "satellite": satellite_img,
+                    "uav": uav_imgs,
+                    "label": valid_place_idx
+                }
+                total_images += 1 + len(uav_imgs)
+                valid_place_idx += 1
+
         return place_ids, total_images
     
     def __getitem__(self, index):

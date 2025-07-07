@@ -7,6 +7,7 @@ import utils
 from models import helper
 from vpr_eval import VPREvaluator
 from vpr_eval_GTA import GTAEvaluator
+from vpr_eval_LTA import LTAEvaluator
 
 def average_precision(ranked_relevance):
     """
@@ -208,18 +209,20 @@ class VPRModel(pl.LightningModule):
         self.batch_acc = []
 
         self.eval()
-        # evaluator = VPREvaluator(
-        #     model=self,
-        #     gallery_path="/data/qiaoq/Project/salad_tz/datasets/DenseUAV/test/gallery_satellite",
-        #     query_path="/data/qiaoq/Project/salad_tz/datasets/DenseUAV/test/query_drone",
-        #     batch_size=32,
-        # )
-        evaluator = GTAEvaluator(
-            model = self,
-            test_json = '/data/qiaoq/Project/salad_tz/datasets/GTA-UAV-LR/same-area-drone2sate-test.json',
-            root_dir = '/data/qiaoq/Project/salad_tz/datasets/GTA-UAV-LR',
-            batch_size = 32
+        evaluator = VPREvaluator(
+            model=self,
+            gallery_path="/data/qiaoq/Project/salad_tz/datasets/DenseUAV/test/gallery_satellite",
+            query_path="/data/qiaoq/Project/salad_tz/datasets/DenseUAV/test/query_drone",
+            batch_size=32,
         )
+        # evaluator = LTAEvaluator(
+        #     model = self,
+        #     test_path = '/data/qiaoq/Project/salad_tz/datasets/LTA/test',
+        #     window_size = (200, 200),
+        #     stride = (100, 100),
+        #     batch_size = 32,
+        #     iou_threshold = 0.14
+        # )
         stats = evaluator.evaluate()
 
     # For validation, we will also iterate step by step over the validation set

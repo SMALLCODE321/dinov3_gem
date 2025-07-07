@@ -68,50 +68,45 @@ class PatchDataset(Dataset):
 
     def get_all_satellite(self):
         """
-        返回所有卫星图像的路径列表。
+        返回所有卫星图像的路径列表以及对应的 id（子目录名）。
+        支持的后缀：jpg, jpeg, png, bmp, tif, tiff，
+        不再区分先采非 TIFF 再采 TIFF，所有格式全部保留。
         """
-        sat_non_tif_exts = ("*.jpg", "*.jpeg", "*.png", "*.bmp")
-        sat_tif_exts = ("*.tif", "*.tiff")
+        sat_exts = ("*.jpg", "*.jpeg", "*.png", "*.bmp", "*.tif", "*.tiff")
         sat_paths = []
-        ids = []
+        ids       = []
+
         for sub in os.listdir(self.sat_dir):
             subdir = os.path.join(self.sat_dir, sub)
             if not os.path.isdir(subdir):
                 continue
 
-            # 先找非 tif
-            non_tif = []
-            for e in sat_non_tif_exts:
-                non_tif += glob.glob(os.path.join(subdir, e))
-            # 再找 tif
-            tif = []
-            for e in sat_tif_exts:
-                tif += glob.glob(os.path.join(subdir, e))
+            # 收集所有支持的后缀
+            imgs = []
+            for ext in sat_exts:
+                imgs.extend(glob.glob(os.path.join(subdir, ext)))
 
-            if non_tif:
-                chosen = sorted(non_tif)
-            elif tif:
-                chosen = [random.choice(tif)]
-            else:
-                # 此子文件夹下没找到任何支持的图
+            if not imgs:
                 continue
 
-            for p in chosen:
-                sat_paths.append(p)
-                ids.append(sub)
+            sat_paths.append(sorted(imgs))
+            ids.append(sub)
 
         if not sat_paths:
-            raise ValueError(f"在 {self.sat_dir} 下没有找到任何支持的 gallery 图像。")
+            raise ValueError(f"在 {self.sat_dir} 下没有找到任何支持的卫星图像。")
         return sat_paths, ids
     
     def __getitem__(self, idx):
         pid = self.ids[idx]
         sat_path = self.sat_paths[idx]
-        try:
+        galleries = []
+        if sat_path is list:
+            for path in sat_path:
+                img = Image.open(path).convert('RGB')
+                galleries.append(self.transform(img))
+        else:
             img = Image.open(sat_path).convert('RGB')
-        except UnidentifiedImageError:
-            img = Image.new('RGB', self.transform.transforms[0].size)
-        base = self.transform(img)
+            galleries.append(self.transform(img))
 
         # load all query images
         qd = os.path.join(self.query_dir, pid)
@@ -135,10 +130,9 @@ class PatchDataset(Dataset):
             queries.append(self.transform(qimg))
         
         for _ in range(self.num_augs):
-            # 如果查询图像数量不足，进行增强
             queries.append(self.aug_transform(img))
 
-        patches = [base] + queries
+        patches = galleries + queries
         stacked = torch.stack(patches, dim=0)  # (1+Nq, C, H, W)
 
         # use pid as integer label

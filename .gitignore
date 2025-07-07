@@ -7,6 +7,10 @@ datasets/
 train_result/
 output_extractor/
 demo/
+GTA-UAV/
+Sample4Geo/
+SUES-200-Benchmark/
+DAC/
 
 # 忽略权重文件目录
 checkpoints/

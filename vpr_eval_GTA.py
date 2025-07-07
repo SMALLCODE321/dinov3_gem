@@ -139,92 +139,49 @@ class GTAEvaluator:
                 feats.append(out.cpu())
         return torch.cat(feats, 0).numpy()
 
-    def compute_mAP_cmc(
-        self,
-        index: np.ndarray,
-        good_index: np.ndarray
-    ):
-        """
-        计算单个 query 的 AP 和 CMC 向量
-        输入:
-          index      -- 排序后的 gallery 下标数组，shape (G,)
-          good_index -- 正例下标数组，shape (ngood,)
-        输出:
-          ap  -- Average Precision (float)
-          cmc -- CMC 向量，shape (G,) (0/1 或 -1 表示跳过)
-        """
-        G = len(index)
-        cmc = np.zeros(G, dtype=int)
-
-        if good_index.size == 0:
-            cmc[0] = -1
-            return 0.0, cmc
-
-        mask_good = np.in1d(index, good_index)
-        rows_good = np.where(mask_good)[0]
-        if rows_good.size == 0:
-            return 0.0, cmc
-
-        first_hit = rows_good[0]
-        cmc[first_hit:] = 1
-
-        # 计算 AP
-        ngood = good_index.size
-        ap = 0.0
-        for i, rg in enumerate(rows_good):
-            d_recall = 1.0 / ngood
-            precision_i = (i + 1) / (rg + 1)
-            if rg != 0:
-                precision_prev = i / rg
-            else:
-                precision_prev = 1.0
-            ap += d_recall * (precision_prev + precision_i) / 2.0
-
-        return ap, cmc
-
     def evaluate(
         self,
         top10_log: bool = False
     ) -> Dict[str, float]:
         """
         运行评估：
-          - Recall@1/3/5, Recall@top1%, mAP, SDM@k, Dis@d
+          - Recall@1/3/5, Recall@top1%, mAP (用 average_precision_score 计算), SDM@k, Dis@d
         """
+        # —— 1. 特征提取 —— 
         q_feats = self._extract_descriptors(self.query_list)    # (Q, D)
         g_feats = self._extract_descriptors(self.gallery_list)  # (G, D)
         Q, G = q_feats.shape[0], g_feats.shape[0]
-        scores = q_feats @ g_feats.T                            # (Q, G)
+        scores = q_feats @ g_feats.T  # (Q, G) 相似度得分矩阵
 
-        # 初始化累加器
+        # —— 2. 初始化累加器 —— 
         cmc_sum = np.zeros(G, dtype=int)
-        ap_list  = []       # 存放每个 query 的 AP
-        valid_q  = 0        # 有正样本的 query 数
+        ap_list  = []
+        valid_q  = 0
         sdm_sum  = np.zeros(len(self.sdmk_list), dtype=float)
         dis_sum  = np.zeros(len(self.disk_list), dtype=float)
-
         top10_all = [] if top10_log else None
 
         print(f"[GTAEval] {Q} queries, {G} gallery -> computing metrics ...")
         for i in range(Q):
-            # 排序
-            idx_sorted = np.argsort(scores[i])[::-1]
-            # 找到正例的 gallery 下标
-            qbase = os.path.basename(self.query_list[i])
-            pos_names = self.pairs_dict[qbase]
-            good_idx = np.array([self._gal_idx[n] for n in pos_names], dtype=int)
+            # 2.1 排序
+            idx_sorted = np.argsort(scores[i])[::-1]  # 得到 gallery 排名
 
-            # 构造 y_true, y_score（降序排列后）
-            mask_good = np.in1d(idx_sorted, good_idx)     # bool array, length G
-            rows_good = np.where(mask_good)[0]
-            if rows_good.size == 0:
-                # 该 query 无正例，跳过
+            # 2.2 正样本下标 good_idx
+            qname = os.path.basename(self.query_list[i])
+            pos_names = self.pairs_dict[qname]          # 多个正样本文件名
+            good_idx = np.array([self._gal_idx[n] for n in pos_names], dtype=int)
+            if good_idx.size == 0:
+                # 如果这条 query 在 gallery 中没有任何正样本，就跳过
                 continue
 
-            # 计算 CMC
+            # 2.3 计算 Recall@K (CMC) —— 看第一个命中的位置 first_hit
+            mask_good = np.in1d(idx_sorted, good_idx)
+            rows_good = np.where(mask_good)[0]
             first_hit = rows_good[0]
             cmc_sum[first_hit:] += 1
 
-            # 计算 AP
+            # 2.4 计算 AP（mAP）—— 用 average_precision_score
+            #     y_true: length G 的 0/1 向量，y_score: 对应的 scores
             y_true   = mask_good.astype(int)
             y_scores = scores[i][idx_sorted]
             ap_i = average_precision_score(y_true, y_scores)
@@ -232,14 +189,14 @@ class GTAEvaluator:
 
             valid_q += 1
 
-            # 计算 SDM
+            # 2.5 SDM@k
             sdm_vals = sdm(self.query_centers[i],
                            self.sdmk_list,
                            idx_sorted,
                            self.gallery_centers)
             sdm_sum += np.array(sdm_vals, dtype=float)
 
-            # 计算 Dis
+            # 2.6 Dis@d
             dis_vals = get_dis(self.query_centers[i],
                                idx_sorted,
                                self.gallery_centers,
@@ -247,22 +204,21 @@ class GTAEvaluator:
                                match_loc=None)
             dis_sum += np.array(dis_vals, dtype=float)
 
-            # 记录 Top10（可选）
+            # 2.7 Top10 logging（可选）
             if top10_log:
                 top10 = [os.path.basename(self.gallery_list[j])
                          for j in idx_sorted[:10]]
-                top10_all.append((qbase, top10))
+                top10_all.append((qname, top10))
 
         if valid_q == 0:
             raise RuntimeError("No valid queries with positives found.")
 
-        # 归一化
+        # —— 3. 归一化 & 输出 —— 
         cmc_avg = cmc_sum.astype(float) / valid_q
         mAP     = np.mean(ap_list) * 100
         sdm_avg = sdm_sum / valid_q
         dis_avg = dis_sum / valid_q
 
-        # 构造输出
         results: Dict[str, float] = {}
         for k in self.topk_ranks:
             if G >= k:
@@ -278,17 +234,17 @@ class GTAEvaluator:
 
         # 打印
         print("===== GTAUAV Evaluation Results =====")
-        for k, v in results.items():
-            if k != "num_queries":
-                print(f"{k}: {v:.4f}")
+        for key, val in results.items():
+            if key == "num_queries":
+                print(f"{key}: {val}")
             else:
-                print(f"{k}: {v}")
+                print(f"{key}: {val:.4f}")
 
         if top10_log:
-            for qbase, top10 in top10_all:
-                print(f"Query {qbase} -> Top10: {top10}")
+            for qname, top10 in top10_all:
+                print(f"Query {qname} -> Top10: {top10}")
 
-        # 清理
+        # 释放
         del q_feats, g_feats, scores
         gc.collect()
         if torch.cuda.is_available():

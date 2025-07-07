@@ -21,7 +21,6 @@ class ImageFolderDataModule(pl.LightningDataModule):
                  sat_aug_per_place=5, #卫星放射变换图像数
                  image_size=(322, 322),
                  num_workers=4,
-                 show_data_stats=True,
                  mean_std=IMAGENET_MEAN_STD,
                  data_path=None,
                  val_set_names=['val']
@@ -33,11 +32,9 @@ class ImageFolderDataModule(pl.LightningDataModule):
         self.img_per_place = img_per_place
         self.sat_aug_per_place = sat_aug_per_place
         self.num_workers = num_workers
-        self.show_data_stats = show_data_stats
         self.data_path = data_path
         self.mean_dataset = mean_std['mean']
         self.std_dataset = mean_std['std']
-        self.val_set_names = val_set_names
 
         self.save_hyperparameters() # save hyperparameter with Pytorch Lightening
 
@@ -85,8 +82,7 @@ class ImageFolderDataModule(pl.LightningDataModule):
             #         print(
             #             f'Validation set {self.val_set_name} does not exist or has not been implemented yet')
             #         raise NotImplementedError
-            if self.show_data_stats:
-                self.print_stats()
+            self.print_stats()
 
     def reload(self):
         # 创建无人机数据数据集，对应每个地点直接加载对应的图像

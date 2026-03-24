@@ -67,6 +67,15 @@
                 "--index_info_csv", "./output_extractor/train_db_uavvisloc_50epoch/patches_index.csv",
                 "--batch_size", "1"
             ]
+        },
+        {
+            "name": "Debug Train",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/main_train.py",
+            "console": "integratedTerminal",
+            "cwd": "${workspaceFolder}",
+            "justMyCode": false
         }
     ]
     

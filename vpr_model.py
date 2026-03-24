@@ -1,14 +1,13 @@
 import pytorch_lightning as pl
-import torch
-from torch.optim import lr_scheduler, optimizer
+import torch 
+from torch.optim import lr_scheduler
 import numpy as np
 import torch.nn.functional as F
 import utils
 from models import helper
 from vpr_eval import VPREvaluator
-from vpr_eval_GTA import GTAEvaluator
-from vpr_eval_LTA import LTAEvaluator
-
+from models.aggregators.SAFA import SAFA
+from torch import nn
 def average_precision(ranked_relevance):
     """
     计算单个 query 的 Average Precision (AP)
@@ -95,17 +94,17 @@ class VPRModel(pl.LightningModule):
         # get the backbone and the aggregator
         self.backbone = helper.get_backbone(backbone_arch, backbone_config)
         self.aggregator = helper.get_aggregator(agg_arch, agg_config)
-
-        # For validation in Lightning v2.0.0
         self.val_outputs = []
         
     # the forward pass of the lightning model
     def forward(self, x):
-        x = self.backbone(x)
-        x = self.aggregator(x)
-        return x
-    
-    # configure the optimizer 
+        f, t = self.backbone(x)      # f: (B,C,H,W), t: (B,C)
+        f_gem = self.aggregator(f)
+        if f_gem.dim() == 4:
+            f_gem = f_gem.flatten(1)
+        desc = torch.cat([f_gem, t], dim=1)
+        return desc
+
     def configure_optimizers(self):
         if self.optimizer.lower() == 'sgd':
             optimizer = torch.optim.SGD(
@@ -149,7 +148,73 @@ class VPRModel(pl.LightningModule):
         # warm up lr
         optimizer.step(closure=optimizer_closure)
         self.lr_schedulers().step()
-        
+    
+    '''
+    def loss_function(self, descriptors, labels):
+        """
+        fp16-safe hierarchical ranking loss
+        """
+
+        # ===== 1. 原 MultiSimilarity loss =====
+        if self.miner is not None:
+            miner_outputs = self.miner(descriptors, labels)
+            loss_ms = self.loss_fn(descriptors, labels, miner_outputs)
+
+            nb_samples = descriptors.shape[0]
+            nb_mined = len(set(miner_outputs[0].detach().cpu().numpy()))
+            batch_acc = 1.0 - (nb_mined / nb_samples)
+        else:
+            loss_ms = self.loss_fn(descriptors, labels)
+            batch_acc = 0.0
+            if isinstance(loss_ms, tuple):
+                loss_ms, batch_acc = loss_ms
+
+        # ===== 2. similarity =====
+        sim = descriptors @ descriptors.T   # (B, B)
+        labels = labels.view(-1)
+        B = labels.size(0)
+        device = descriptors.device
+
+        # dtype-safe negative infinity
+        neg_inf = torch.finfo(sim.dtype).min
+
+        # masks
+        mask_pos = labels.unsqueeze(0) == labels.unsqueeze(1)
+        mask_neg = ~mask_pos
+
+        eye = torch.eye(B, device=device, dtype=torch.bool)
+        mask_pos = mask_pos & (~eye)
+
+        # ===== 3. Top-K Soft Margin =====
+        K = 3
+        margin_k = 0.1
+
+        pos_topk = sim.masked_fill(~mask_pos, neg_inf).topk(K, dim=1)[0].mean(dim=1)
+        neg_topk = sim.masked_fill(~mask_neg, neg_inf).topk(K, dim=1)[0].mean(dim=1)
+
+        loss_topk = F.relu(neg_topk - pos_topk + margin_k).mean()
+
+        # ===== 4. Top-1 Hard Margin =====
+        margin_1 = 0.2
+
+        pos_max = sim.masked_fill(~mask_pos, neg_inf).max(dim=1)[0]
+        neg_max = sim.masked_fill(~mask_neg, neg_inf).max(dim=1)[0]
+
+        loss_top1 = F.relu(neg_max - pos_max + margin_1).mean()
+
+        # ===== 5. total loss =====
+        loss = loss_ms + 0.3 * loss_topk + 0.5 * loss_top1
+
+        # ===== 6. logging =====
+        self.batch_acc.append(batch_acc)
+        self.log('b_acc', sum(self.batch_acc) / len(self.batch_acc), prog_bar=True)
+        self.log('loss_ms', loss_ms, prog_bar=False)
+        self.log('loss_topk', loss_topk, prog_bar=False)
+        self.log('loss_top1', loss_top1, prog_bar=False)
+
+        return loss
+
+    '''
     #  The loss function call (this method will be called at each training iteration)
     def loss_function(self, descriptors, labels):
         # we mine the pairs/triplets if there is an online mining strategy
@@ -181,6 +246,7 @@ class VPRModel(pl.LightningModule):
                 len(self.batch_acc), prog_bar=True, logger=True)
         return loss
     
+    
     # This is the training step that's executed at each iteration
     def training_step(self, batch, batch_idx):
         places, labels = batch
@@ -195,7 +261,7 @@ class VPRModel(pl.LightningModule):
 
         # Feed forward the batch to the model
         descriptors = self(images) # Here we are calling the method forward that we defined above
-
+        
         if torch.isnan(descriptors).any():
             raise ValueError('NaNs in descriptors')
 
@@ -206,25 +272,24 @@ class VPRModel(pl.LightningModule):
     
     def on_train_epoch_end(self):
         # we empty the batch_acc list for next epoch
+    
         self.batch_acc = []
-
+        
+        
+        #if self.current_epoch < self.trainer.max_epochs -10:
+        #  return
+        
+        
+        
         self.eval()
         evaluator = VPREvaluator(
             model=self,
-            gallery_path="/data/qiaoq/Project/salad_tz/datasets/DenseUAV/test/gallery_satellite",
-            query_path="/data/qiaoq/Project/salad_tz/datasets/DenseUAV/test/query_drone",
+            gallery_path="./datasets/University-1652/test/gallery_satellite",
+            query_path="./datasets/University-1652/test/query_drone",
             batch_size=32,
         )
-        # evaluator = LTAEvaluator(
-        #     model = self,
-        #     test_path = '/data/qiaoq/Project/salad_tz/datasets/LTA/test',
-        #     window_size = (200, 200),
-        #     stride = (100, 100),
-        #     batch_size = 32,
-        #     iou_threshold = 0.14
-        # )
         stats = evaluator.evaluate()
-
+    
     # For validation, we will also iterate step by step over the validation set
     # this is the way Pytorch Lghtning is made. All about modularity, folks.
     def on_validation_start(self) -> None:
@@ -264,6 +329,7 @@ class VPRModel(pl.LightningModule):
         """
         把整个 epoch 的所有 batch 结果拼起来，计算 Recall@1/3/5 和 mAP 并 log。
         """
+
         dm = self.trainer.datamodule
         for idx, buf in enumerate(self._val_buffer):
             # 拼接

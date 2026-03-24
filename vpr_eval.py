@@ -44,14 +44,17 @@ class VPREvaluator:
 
         # 输入预处理
         self.input_transform = transforms.Compose([
-            transforms.Resize((322, 322)),
+            transforms.Resize((336, 336)),
             transforms.ToTensor(),
             transforms.Normalize(
-                mean=[0.485, 0.456, 0.406],
-                std =[0.229, 0.224, 0.225]
+                mean=[0.430, 0.411, 0.296],
+                std=[0.213, 0.156, 0.143]
             ),
         ])
-
+        '''
+        mean=[0.485, 0.456, 0.406],
+        std =[0.229, 0.224, 0.225]
+        '''
         # Model
         self.model = model.to(self.device).eval()
         print(f"[Evaluator] using provided model on {self.device}")

@@ -70,7 +70,7 @@ class DINOv2(nn.Module):
         t = x[:, 0]
         #二维数组从第1列开始的所有列
         f = x[:, 1:]
-
+        #特征提取分离cls和patch tokens
         # Reshape to (B, C, H, W)
         f = f.reshape((B, H // 14, W // 14, self.num_channels)).permute(0, 3, 1, 2)
 

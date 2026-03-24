@@ -1,7 +1,12 @@
-*.pth
-*.sh
-*.pyc
 
+*.pth
+*.pt
+*.tif
+*.jpg
+*.png
+*.dll
+datasets/
+__pycache__/
 # 忽略数据集目录
 datasets/
 train_result/

@@ -139,11 +139,15 @@ class VPREvaluator:
         image_paths: List[str]
     ) -> Tuple[np.ndarray, List[int]]:
         """
-        批量提取图像特征，返回 (N, D) + 对应 ids
+        通过路径自动识别 drone/satellite 并执行非对称分辨率处理
         """
         all_feats = []
         all_ids = []
         model_dtype = torch.float16 if "cuda" in self.device else torch.float32
+        
+        # 设定你想测试的无人机降质分辨率（如果是正常评估，设为 336）
+        # 汇报时可以手动改这个值，或者从 self 的某个属性读取
+        target_drone_res = 128  # 比如你想测试 128px 的鲁棒性
 
         with torch.no_grad():
             for i in tqdm(
@@ -154,13 +158,20 @@ class VPREvaluator:
                 imgs = []
                 for p in batch:
                     im = Image.open(p).convert("RGB")
-                    imgs.append(self.input_transform(im))
+                    # 根据路径判断是无人机图还是卫星图
+                    if "drone" in p:
+                        im = transforms.Resize((target_drone_res, target_drone_res))(im)    
+                    im = self.input_transform(im)
+                    
+                    imgs.append(im)
                     all_ids.append(self._id_from_path(p))
+
                 x = torch.stack(imgs, 0).to(self.device)
                 with torch.autocast(self.device.split(":")[0], model_dtype):
                     feats = self.model(x)
-                    feats = F.normalize(feats, dim=1, p=2)
+                    feats = torch.nn.functional.normalize(feats, dim=1, p=2)
                 all_feats.append(feats.cpu())
+
         feats = torch.cat(all_feats, 0).float().numpy()
         return feats, all_ids
 

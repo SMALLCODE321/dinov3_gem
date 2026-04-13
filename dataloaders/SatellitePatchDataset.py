@@ -4,6 +4,8 @@ from PIL import Image, UnidentifiedImageError
 import torch
 from torch.utils.data import Dataset, DataLoader
 import torchvision.transforms as T
+import torchvision.transforms.functional as TF
+import numpy as np
 import pytorch_lightning as pl
 from prettytable import PrettyTable
 IMAGENET_MEAN_STD = {
@@ -46,7 +48,7 @@ class SatelliteSmallDataset(Dataset):
             raise ValueError("data_path 指定的路径不存在。")
 
         self.num_images = len(self.image_paths)
-
+        self.angles = np.linspace(0, 180, self.sat_aug_per_place, endpoint=False)
     def __len__(self):
         return self.num_images
 
@@ -66,11 +68,15 @@ class SatelliteSmallDataset(Dataset):
 
         # 数据增强
         aug_patches = []
-        for _ in range(self.sat_aug_per_place):
-            if self.aug_transform is not None:
-                aug_patch = self.aug_transform(img)
-            else:
-                aug_patch = T.ToTensor()(img)
+        for angle in self.angles:
+            rotated_img = TF.rotate(
+                img,
+                angle=angle,
+                interpolation=T.InterpolationMode.BILINEAR,
+                expand=False
+            )
+            # 2. 进入增强（里面不再包含 RandomRotation！）
+            aug_patch = self.aug_transform(rotated_img)
             aug_patches.append(aug_patch)
 
         # 合并基础版和增强版
@@ -123,7 +129,7 @@ class SatelliteSmallDataModule(pl.LightningDataModule):
         self.aug_transform = T.Compose([
             T.RandomResizedCrop(size=image_size, scale=(0.5, 0.9)), # 扩大缩放范围，模拟高度差异
             T.RandomHorizontalFlip(p=0.5), # 无人机视角下左右翻转语义一致
-            T.RandomRotation(degrees=180), # 全向旋转
+            
             T.RandomPerspective(distortion_scale=0.5, p=0.7),
             T.ColorJitter(0.2, 0.2, 0.2, 0.1), # 模拟光照和传感器差异
             T.RandAugment(num_ops=2, magnitude=9),

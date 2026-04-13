@@ -7,6 +7,7 @@ import utils
 from models import helper
 from vpr_eval import VPREvaluator
 from models.aggregators.SAFA import SAFA
+from models.aggregators.RMAC import ScaleWeightedRMAC
 from torch import nn
 def average_precision(ranked_relevance):
     """
@@ -94,6 +95,7 @@ class VPRModel(pl.LightningModule):
         # get the backbone and the aggregator
         self.backbone = helper.get_backbone(backbone_arch, backbone_config)
         self.aggregator = helper.get_aggregator(agg_arch, agg_config)
+        self.sw_rmac = ScaleWeightedRMAC(init_p=3.0, alpha=6.0)
         self.val_outputs = []
         
     # the forward pass of the lightning model
@@ -104,7 +106,6 @@ class VPRModel(pl.LightningModule):
             f_gem = f_gem.flatten(1)
         desc = torch.cat([f_gem, t], dim=1)
         return desc
-
     def configure_optimizers(self):
         if self.optimizer.lower() == 'sgd':
             optimizer = torch.optim.SGD(

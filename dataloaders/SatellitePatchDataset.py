@@ -9,8 +9,8 @@ import numpy as np
 import pytorch_lightning as pl
 from prettytable import PrettyTable
 IMAGENET_MEAN_STD = {
-    'mean': [0.430, 0.411, 0.296],
-    'std': [0.213, 0.156, 0.143]
+    'mean': [0.485, 0.456, 0.406],
+    'std': [0.229, 0.224, 0.225]
 }
 
 

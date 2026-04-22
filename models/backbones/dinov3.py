@@ -1,3 +1,6 @@
+from pathlib import Path
+import sys
+
 import torch
 import torch.nn as nn
 from safetensors.torch import load_file as safetensors_load
@@ -45,13 +48,33 @@ class DINOv3(nn.Module):
         self.return_token = return_token
         self.pretrained_path = pretrained_path
         self.pretrained=pretrained
-        self.model = torch.hub.load(
-            '/data/xulj/dinov3-salad/models/backbones/facebookresearch/dinov3',
-            model_name,
-            source='local',
-            pretrained=self.pretrained,
-            weights=self.pretrained_path
-        )
+        package_root = Path(__file__).resolve().parents[2] / "facebookresearch" / "dinov3"
+        if str(package_root) not in sys.path:
+            sys.path.insert(0, str(package_root))
+
+        from dinov3.hub.backbones import dinov3_vitb16, dinov3_vitl16, dinov3_vits16  # type: ignore
+
+        model_map = {
+            "dinov3_vits16": dinov3_vits16,
+            "dinov3_vitb16": dinov3_vitb16,
+            "dinov3_vitl16": dinov3_vitl16,
+        }
+        if self.pretrained_path is not None:
+            self.model = model_map[model_name](pretrained=False)
+            try:
+                state_dict = torch.load(self.pretrained_path, map_location="cpu", weights_only=True)
+            except TypeError:
+                state_dict = torch.load(self.pretrained_path, map_location="cpu")
+            if isinstance(state_dict, dict):
+                if "state_dict" in state_dict and isinstance(state_dict["state_dict"], dict):
+                    state_dict = state_dict["state_dict"]
+                elif "model" in state_dict and isinstance(state_dict["model"], dict):
+                    state_dict = state_dict["model"]
+            if any(key.startswith("module.") for key in state_dict):
+                state_dict = {key[len("module.") :]: value for key, value in state_dict.items()}
+            self.model.load_state_dict(state_dict, strict=False)
+        else:
+            self.model = model_map[model_name](pretrained=self.pretrained)
         self.num_register_tokens = getattr(self.model, "n_storage_tokens", 0)
     def forward(self, x):
         B, C, H, W = x.shape
@@ -104,7 +127,3 @@ class DINOv3(nn.Module):
         if self.return_token:
             return patch_tokens, cls_token
         return patch_tokens
-
-# Example usage:
-model = DINOv3()
-torch.save(model.state_dict(), "dinov3_weight.pth")  # Save model weights

@@ -1,442 +1,254 @@
+from __future__ import annotations
+
+from typing import Dict, Optional
+
 import pytorch_lightning as pl
-import torch 
-from torch.optim import lr_scheduler
-import numpy as np
+import torch
 import torch.nn.functional as F
+from torch import nn
+from torch.optim import lr_scheduler
+
 import utils
 from models import helper
-from vpr_eval import VPREvaluator
-from models.aggregators.SAFA import SAFA
-from models.aggregators.RMAC import ScaleWeightedRMAC
-from torch import nn
-def average_precision(ranked_relevance):
-    """
-    计算单个 query 的 Average Precision (AP)
-    ranked_relevance: 按相似度排序后的二值列表（1 表示正例，0 表示负例）
-    """
-    num_relevant = sum(ranked_relevance)
-    if num_relevant == 0:
-        return 0.0
-    ap = 0.0
-    correct = 0
-    for i, rel in enumerate(ranked_relevance):
-        if rel:
-            correct += 1
-            ap += correct / (i + 1)
-    return ap / num_relevant
+from vfm_loc_eval import University1652VfmLocEvaluator
+
+
+class OrthogonalAdapter(nn.Module):
+    def __init__(self, dim: int) -> None:
+        super().__init__()
+        self.weight = nn.Parameter(torch.eye(dim))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return x @ self.weight
+
+    def orthogonality_penalty(self) -> torch.Tensor:
+        identity = torch.eye(self.weight.size(0), device=self.weight.device, dtype=self.weight.dtype)
+        gram = self.weight.transpose(0, 1) @ self.weight
+        return (gram - identity).pow(2).mean()
+
 
 class VPRModel(pl.LightningModule):
-    """This is the main model for Visual Place Recognition
-    we use Pytorch Lightning for modularity purposes.
-
-    Args:
-        pl (_type_): _description_
-    """
-
-    def __init__(self,
-        #---- Backbone
-        backbone_arch='resnet50',
-        backbone_config={},
-        
-        #---- Aggregator
-        agg_arch='ConvAP',
-        agg_config={},
-        
-        #---- Train hyperparameters
-        lr=0.03, 
-        optimizer='sgd',
-        weight_decay=1e-3,
-        momentum=0.9,
-        lr_sched='linear',
-        lr_sched_args = {
-            'start_factor': 1,
-            'end_factor': 0.2,
-            'total_iters': 4000,
-        },
-        
-        #----- Loss
-        loss_name='MultiSimilarityLoss', 
-        miner_name='MultiSimilarityMiner', 
-        miner_margin=0.1,
-        faiss_gpu=False
-    ):
+    def __init__(
+        self,
+        backbone_arch: str = "resnet50",
+        backbone_config: Optional[Dict] = None,
+        agg_arch: str = "ConvAP",
+        agg_config: Optional[Dict] = None,
+        lr: float = 0.03,
+        optimizer: str = "sgd",
+        weight_decay: float = 1e-3,
+        momentum: float = 0.9,
+        lr_sched: str = "linear",
+        lr_sched_args: Optional[Dict] = None,
+        loss_name: str = "MultiSimilarityLoss",
+        miner_name: str = "MultiSimilarityMiner",
+        miner_margin: float = 0.1,
+        faiss_gpu: bool = False,
+        use_orthogonal_adapter: bool = True,
+        orthogonal_lambda: float = 1e-3,
+        eval_config: Optional[Dict] = None,
+    ) -> None:
         super().__init__()
 
-        # Backbone
-        self.encoder_arch = backbone_arch
-        self.backbone_config = backbone_config
-        
-        # Aggregator
-        self.agg_arch = agg_arch
-        self.agg_config = agg_config
+        self.backbone_config = backbone_config or {}
+        self.agg_config = agg_config or {}
+        self.lr_sched_args = lr_sched_args or {
+            "start_factor": 1.0,
+            "end_factor": 0.2,
+            "total_iters": 4000,
+        }
+        self.eval_config = eval_config or {}
 
-        # Train hyperparameters
         self.lr = lr
         self.optimizer = optimizer
         self.weight_decay = weight_decay
         self.momentum = momentum
         self.lr_sched = lr_sched
-        self.lr_sched_args = lr_sched_args
-
-        # Loss
         self.loss_name = loss_name
         self.miner_name = miner_name
         self.miner_margin = miner_margin
-        
-        self.save_hyperparameters() # write hyperparams into a file
-        
+        self.faiss_gpu = faiss_gpu
+        self.use_orthogonal_adapter = use_orthogonal_adapter
+        self.orthogonal_lambda = orthogonal_lambda
+
+        self.save_hyperparameters()
+
         self.loss_fn = utils.get_loss(loss_name)
         self.miner = utils.get_miner(miner_name, miner_margin)
-        self.batch_acc = [] # we will keep track of the % of trivial pairs/triplets at the loss level 
+        self.batch_acc = []
 
-        self.faiss_gpu = faiss_gpu
-        
-        # ----------------------------------
-        # get the backbone and the aggregator
-        self.backbone = helper.get_backbone(backbone_arch, backbone_config)
-        self.aggregator = helper.get_aggregator(agg_arch, agg_config)
-        self.sw_rmac = ScaleWeightedRMAC(init_p=3.0, alpha=6.0)
-        self.val_outputs = []
-        
-    # the forward pass of the lightning model
-    def forward(self, x):
-        f, t = self.backbone(x)      # f: (B,C,H,W), t: (B,C)
-        f_gem = self.aggregator(f)
-        if f_gem.dim() == 4:
-            f_gem = f_gem.flatten(1)
-        desc = torch.cat([f_gem, t], dim=1)
-        return desc
+        self.backbone = helper.get_backbone(backbone_arch, self.backbone_config)
+        self.aggregator = helper.get_aggregator(agg_arch, self.agg_config)
+
+        if not hasattr(self.backbone, "num_channels"):
+            raise AttributeError("Backbone must expose num_channels for the orthogonal baseline.")
+        self.descriptor_dim = int(self.backbone.num_channels) * 2
+        self.query_adapter = OrthogonalAdapter(self.descriptor_dim) if use_orthogonal_adapter else None
+
+    def encode_backbone(self, x: torch.Tensor) -> torch.Tensor:
+        feature_map, cls_token = self.backbone(x)
+        pooled = self.aggregator(feature_map)
+        if pooled.dim() == 4:
+            pooled = pooled.flatten(1)
+        return torch.cat([pooled, cls_token], dim=1)
+
+    def apply_query_adapter(self, x: torch.Tensor) -> torch.Tensor:
+        if self.query_adapter is None:
+            return x
+        return self.query_adapter(x)
+
+    def forward(self, x: torch.Tensor, apply_adapter: bool = False) -> torch.Tensor:
+        descriptors = self.encode_backbone(x)
+        if apply_adapter:
+            descriptors = self.apply_query_adapter(descriptors)
+        return descriptors
+
     def configure_optimizers(self):
-        if self.optimizer.lower() == 'sgd':
+        optimizer_name = self.optimizer.lower()
+        if optimizer_name == "sgd":
             optimizer = torch.optim.SGD(
-                self.parameters(), 
-                lr=self.lr, 
-                weight_decay=self.weight_decay, 
-                momentum=self.momentum
+                self.parameters(),
+                lr=self.lr,
+                weight_decay=self.weight_decay,
+                momentum=self.momentum,
             )
-        elif self.optimizer.lower() == 'adamw':
+        elif optimizer_name == "adamw":
             optimizer = torch.optim.AdamW(
-                self.parameters(), 
-                lr=self.lr, 
-                weight_decay=self.weight_decay
+                self.parameters(),
+                lr=self.lr,
+                weight_decay=self.weight_decay,
             )
-        elif self.optimizer.lower() == 'adam':
-            optimizer = torch.optim.AdamW(
-                self.parameters(), 
-                lr=self.lr, 
-                weight_decay=self.weight_decay
+        elif optimizer_name == "adam":
+            optimizer = torch.optim.Adam(
+                self.parameters(),
+                lr=self.lr,
+                weight_decay=self.weight_decay,
             )
         else:
-            raise ValueError(f'Optimizer {self.optimizer} has not been added to "configure_optimizers()"')
-        
+            raise ValueError(f"Unsupported optimizer: {self.optimizer}")
 
-        if self.lr_sched.lower() == 'multistep':
-            scheduler = lr_scheduler.MultiStepLR(optimizer, milestones=self.lr_sched_args['milestones'], gamma=self.lr_sched_args['gamma'])
-        elif self.lr_sched.lower() == 'cosine':
-            scheduler = lr_scheduler.CosineAnnealingLR(optimizer, self.lr_sched_args['T_max'])
-        elif self.lr_sched.lower() == 'linear':
+        sched_name = self.lr_sched.lower()
+        if sched_name == "multistep":
+            scheduler = lr_scheduler.MultiStepLR(
+                optimizer,
+                milestones=self.lr_sched_args["milestones"],
+                gamma=self.lr_sched_args["gamma"],
+            )
+        elif sched_name == "cosine":
+            scheduler = lr_scheduler.CosineAnnealingLR(optimizer, self.lr_sched_args["T_max"])
+        elif sched_name == "linear":
             scheduler = lr_scheduler.LinearLR(
                 optimizer,
-                start_factor=self.lr_sched_args['start_factor'],
-                end_factor=self.lr_sched_args['end_factor'],
-                total_iters=self.lr_sched_args['total_iters']
+                start_factor=self.lr_sched_args["start_factor"],
+                end_factor=self.lr_sched_args["end_factor"],
+                total_iters=self.lr_sched_args["total_iters"],
             )
+        else:
+            raise ValueError(f"Unsupported scheduler: {self.lr_sched}")
 
         return [optimizer], [scheduler]
-    
-    # configure the optizer step, takes into account the warmup stage
-    def optimizer_step(self,  epoch, batch_idx, optimizer, optimizer_closure):
-        # warm up lr
+
+    def optimizer_step(self, epoch, batch_idx, optimizer, optimizer_closure):
         optimizer.step(closure=optimizer_closure)
         self.lr_schedulers().step()
-    
-    '''
-    def loss_function(self, descriptors, labels):
-        """
-        fp16-safe hierarchical ranking loss
-        """
 
-        # ===== 1. 原 MultiSimilarity loss =====
+    def compute_metric_loss(self, descriptors: torch.Tensor, labels: torch.Tensor):
         if self.miner is not None:
             miner_outputs = self.miner(descriptors, labels)
-            loss_ms = self.loss_fn(descriptors, labels, miner_outputs)
-
+            loss = self.loss_fn(descriptors, labels, miner_outputs)
             nb_samples = descriptors.shape[0]
             nb_mined = len(set(miner_outputs[0].detach().cpu().numpy()))
             batch_acc = 1.0 - (nb_mined / nb_samples)
         else:
-            loss_ms = self.loss_fn(descriptors, labels)
-            batch_acc = 0.0
-            if isinstance(loss_ms, tuple):
-                loss_ms, batch_acc = loss_ms
-
-        # ===== 2. similarity =====
-        sim = descriptors @ descriptors.T   # (B, B)
-        labels = labels.view(-1)
-        B = labels.size(0)
-        device = descriptors.device
-
-        # dtype-safe negative infinity
-        neg_inf = torch.finfo(sim.dtype).min
-
-        # masks
-        mask_pos = labels.unsqueeze(0) == labels.unsqueeze(1)
-        mask_neg = ~mask_pos
-
-        eye = torch.eye(B, device=device, dtype=torch.bool)
-        mask_pos = mask_pos & (~eye)
-
-        # ===== 3. Top-K Soft Margin =====
-        K = 3
-        margin_k = 0.1
-
-        pos_topk = sim.masked_fill(~mask_pos, neg_inf).topk(K, dim=1)[0].mean(dim=1)
-        neg_topk = sim.masked_fill(~mask_neg, neg_inf).topk(K, dim=1)[0].mean(dim=1)
-
-        loss_topk = F.relu(neg_topk - pos_topk + margin_k).mean()
-
-        # ===== 4. Top-1 Hard Margin =====
-        margin_1 = 0.2
-
-        pos_max = sim.masked_fill(~mask_pos, neg_inf).max(dim=1)[0]
-        neg_max = sim.masked_fill(~mask_neg, neg_inf).max(dim=1)[0]
-
-        loss_top1 = F.relu(neg_max - pos_max + margin_1).mean()
-
-        # ===== 5. total loss =====
-        loss = loss_ms + 0.3 * loss_topk + 0.5 * loss_top1
-
-        # ===== 6. logging =====
-        self.batch_acc.append(batch_acc)
-        self.log('b_acc', sum(self.batch_acc) / len(self.batch_acc), prog_bar=True)
-        self.log('loss_ms', loss_ms, prog_bar=False)
-        self.log('loss_topk', loss_topk, prog_bar=False)
-        self.log('loss_top1', loss_top1, prog_bar=False)
-
-        return loss
-
-    '''
-    #  The loss function call (this method will be called at each training iteration)
-    def loss_function(self, descriptors, labels):
-        # we mine the pairs/triplets if there is an online mining strategy
-        if self.miner is not None:
-            miner_outputs = self.miner(descriptors, labels)
-            loss = self.loss_fn(descriptors, labels, miner_outputs)
-            
-            # calculate the % of trivial pairs/triplets 
-            # which do not contribute in the loss value
-            nb_samples = descriptors.shape[0]
-            nb_mined = len(set(miner_outputs[0].detach().cpu().numpy()))
-            batch_acc = 1.0 - (nb_mined/nb_samples)
-
-        else: # no online mining
             loss = self.loss_fn(descriptors, labels)
             batch_acc = 0.0
-            if type(loss) == tuple: 
-                # somes losses do the online mining inside (they don't need a miner objet), 
-                # so they return the loss and the batch accuracy
-                # for example, if you are developping a new loss function, you might be better
-                # doing the online mining strategy inside the forward function of the loss class, 
-                # and return a tuple containing the loss value and the batch_accuracy (the % of valid pairs or triplets)
+            if isinstance(loss, tuple):
                 loss, batch_acc = loss
+        return loss, batch_acc
 
-        # keep accuracy of every batch and later reset it at epoch start
-        self.batch_acc.append(batch_acc)
-        # log it
-        self.log('b_acc', sum(self.batch_acc) /
-                len(self.batch_acc), prog_bar=True, logger=True)
-        return loss
-    
-    
-    # This is the training step that's executed at each iteration
     def training_step(self, batch, batch_idx):
         places, labels = batch
-        
-        # Note that GSVCities yields places (each containing N images)
-        # which means the dataloader will return a batch containing BS places
-        BS, N, ch, h, w = places.shape
-        
-        # reshape places and labels
-        images = places.view(BS*N, ch, h, w)
-        labels = labels.view(-1)
+        batch_size, num_views, ch, h, w = places.shape
 
-        # Feed forward the batch to the model
-        descriptors = self(images) # Here we are calling the method forward that we defined above
-        
-        if torch.isnan(descriptors).any():
-            raise ValueError('NaNs in descriptors')
+        images = places.view(batch_size * num_views, ch, h, w)
+        flat_labels = labels.view(-1)
+        raw_descriptors = self.forward(images, apply_adapter=False).view(batch_size, num_views, -1)
 
-        loss = self.loss_function(descriptors, labels) # Call the loss_function we defined above
-        
-        self.log('loss', loss.item(), logger=True, prog_bar=True)
-        return {'loss': loss}
-    
-    def on_train_epoch_end(self):
-        # we empty the batch_acc list for next epoch
-    
-        self.batch_acc = []
-        
-        
-        #if self.current_epoch < self.trainer.max_epochs -10:
-        #  return
-        
-        
-        
-        self.eval()
-        evaluator = VPREvaluator(
-            model=self,
-            gallery_path="./datasets/University-1652/test/gallery_satellite",
-            query_path="./datasets/University-1652/test/query_drone",
-            batch_size=32,
+        if self.query_adapter is not None and num_views > 1:
+            reference_descriptors = raw_descriptors[:, :1, :]
+            query_descriptors = self.apply_query_adapter(raw_descriptors[:, 1:, :].reshape(-1, self.descriptor_dim))
+            query_descriptors = query_descriptors.view(batch_size, num_views - 1, self.descriptor_dim)
+            descriptors = torch.cat([reference_descriptors, query_descriptors], dim=1)
+        else:
+            descriptors = raw_descriptors
+
+        descriptors = descriptors.view(batch_size * num_views, -1)
+        metric_loss, batch_acc = self.compute_metric_loss(descriptors, flat_labels)
+        orth_loss = (
+            self.query_adapter.orthogonality_penalty()
+            if self.query_adapter is not None
+            else torch.zeros((), device=descriptors.device)
         )
-        stats = evaluator.evaluate()
-    
-    # For validation, we will also iterate step by step over the validation set
-    # this is the way Pytorch Lghtning is made. All about modularity, folks.
-    def on_validation_start(self) -> None:
-        """
-        在 validation 开始时初始化容器。支持多个 val dataloader。
-        """
-        num_val = len(self.trainer.val_dataloaders)
-        # 为每个 dataloader 都准备一个字典来存 feats/labels
-        self._val_buffer = [
-            {'ref_feats': [], 'ref_lbl': [], 'query_feats': [], 'query_lbl': []}
-            for _ in range(num_val)
-        ]
+        loss = metric_loss + self.orthogonal_lambda * orth_loss
 
-    def validation_step(self, batch, batch_idx, dataloader_idx=0):
-        """
-        batch: imgs (BS, 1+Q, C, H, W), labels (BS, 1+Q)
-        """
-        imgs, labels = batch
-        BS, M, C, H, W = imgs.shape
-        x = imgs.view(BS*M, C, H, W)
-        feats = self(x)                         # (BS*M, D)
-        feats = F.normalize(feats, p=2, dim=1)  # L2 归一
-        feats = feats.detach().cpu().view(BS, M, -1)
-        labs = labels.cpu().view(BS, M)
+        self.batch_acc.append(batch_acc)
+        self.log("loss", loss, prog_bar=True, logger=True, on_step=True, on_epoch=True, batch_size=batch_size)
+        self.log("loss_metric", metric_loss, prog_bar=False, logger=True, on_step=True, on_epoch=True, batch_size=batch_size)
+        self.log("loss_orth", orth_loss, prog_bar=False, logger=True, on_step=True, on_epoch=True, batch_size=batch_size)
+        self.log("b_acc", sum(self.batch_acc) / len(self.batch_acc), prog_bar=True, logger=True, on_step=True, on_epoch=False, batch_size=batch_size)
+        return loss
 
-        buf = self._val_buffer[dataloader_idx]
-        # 累积 reference
-        buf['ref_feats'].append(feats[:, 0, :])     # list of (BS, D)
-        buf['ref_lbl'].append(labs[:, 0])          # list of (BS,)
-        # 累积 queries
-        q_feats = feats[:, 1:, :].reshape(-1, feats.size(-1))  # (BS*(M-1), D)
-        q_lbl   = labs[:, 1:].reshape(-1)                      # (BS*(M-1),)
-        buf['query_feats'].append(q_feats)
-        buf['query_lbl'].append(q_lbl)
+    def on_train_epoch_end(self):
+        self.batch_acc = []
 
-    def on_validation_epoch_end(self) -> None:
-        """
-        把整个 epoch 的所有 batch 结果拼起来，计算 Recall@1/3/5 和 mAP 并 log。
-        """
+        if not self.eval_config.get("enabled", True):
+            return
 
-        dm = self.trainer.datamodule
-        for idx, buf in enumerate(self._val_buffer):
-            # 拼接
-            ref_feats   = torch.cat(buf['ref_feats'],   dim=0).numpy()  # (nr, D)
-            query_feats = torch.cat(buf['query_feats'], dim=0).numpy()  # (nq, D)
-            ref_lbl     = torch.cat(buf['ref_lbl'],     dim=0).numpy()  # (nr,)
-            query_lbl   = torch.cat(buf['query_lbl'],   dim=0).numpy()  # (nq,)
+        is_global_zero = getattr(self.trainer, "is_global_zero", True)
+        metric_names = ("recall@1", "recall@5", "recall@10", "mAP")
+        metric_tensor = torch.zeros(len(metric_names), device=self.device, dtype=torch.float32)
 
-            # 计算相似度矩阵（内积即余弦相似度）
-            sims = query_feats @ ref_feats.T  # (nq, nr)
-            nq, nr = sims.shape
+        if is_global_zero:
+            was_training = self.training
+            self.eval()
 
-            # Recall@K
-            rec = {}
-            for k in (1, 3, 5):
-                # 找到前 k 大的索引
-                topk_idxs = np.argpartition(-sims, kth=k-1, axis=1)[:, :k]  # (nq, k)
-                hits = []
-                for qi in range(nq):
-                    retrieved_lbls = ref_lbl[topk_idxs[qi]]
-                    hits.append((retrieved_lbls == query_lbl[qi]).any())
-                rec[k] = np.mean(hits)
+            evaluator = University1652VfmLocEvaluator(
+                model=self,
+                data_root=self.eval_config["data_root"],
+                image_size=tuple(self.eval_config.get("image_size", (336, 336))),
+                mean=self.eval_config.get("mean", [0.485, 0.456, 0.406]),
+                std=self.eval_config.get("std", [0.229, 0.224, 0.225]),
+                batch_size=int(self.eval_config.get("batch_size", 64)),
+                num_workers=int(self.eval_config.get("num_workers", 4)),
+                pca_dim=int(self.eval_config.get("pca_dim", 256)),
+                ranks=self.eval_config.get("ranks", [1, 5, 10]),
+                step_size=int(self.eval_config.get("step_size", 256)),
+                use_procrustes=bool(self.eval_config.get("use_procrustes", True)),
+            )
+            metrics = evaluator.evaluate()
+            metric_tensor = torch.tensor(
+                [metrics[name] for name in metric_names],
+                device=self.device,
+                dtype=torch.float32,
+            )
 
-            # mAP
-            ap_list = []
-            for qi in range(nq):
-                order = np.argsort(-sims[qi])   # 按相似度降序
-                rel = (ref_lbl[order] == query_lbl[qi]).astype(int).tolist()
-                ap_list.append(average_precision(rel))
-            mAP = float(np.mean(ap_list))
+            print(
+                f"[Epoch {self.current_epoch}] "
+                f"VFM-Loc U1652 -> "
+                f"R@1 {metrics['recall@1']:.2f} | "
+                f"R@5 {metrics['recall@5']:.2f} | "
+                f"R@10 {metrics['recall@10']:.2f} | "
+                f"mAP {metrics['mAP']:.2f}"
+            )
 
-            # log & 打印
-            name = dm.val_set_names[idx]
-            for k, v in rec.items():
-                self.log(f"{name}/Recall@{k}", v, prog_bar=True, logger=True)
-            self.log(f"{name}/mAP", mAP, prog_bar=True, logger=True)
+            if was_training:
+                self.train()
 
-            msg = " | ".join([f"R@{k} {rec[k]*100:.2f}%" for k in rec])
-            print(f"[Epoch {self.current_epoch}] {name} → {msg} | mAP {mAP*100:.2f}%")
+        if self.trainer.world_size > 1:
+            torch.distributed.broadcast(metric_tensor, src=0)
 
-        # 清空 buffer
-        self._val_buffer = None
-
-    #TODO
-    # def validation_step(self, batch, batch_idx, dataloader_idx=0):
-    #     places, _ = batch
-    #     descriptors = self(places)
-    #     # Ensure val_outputs has enough sublists to handle multiple dataloaders
-    #     self.val_outputs[dataloader_idx].append(descriptors.detach().cpu())
-    #     return descriptors.detach().cpu()
-    
-    # def on_validation_epoch_start(self):
-    #     # reset the outputs list
-    #     self.val_outputs = [[] for _ in range(len(self.trainer.datamodule.val_datasets))]
-    
-    # def on_validation_epoch_end(self):
-    #     """this return descriptors in their order
-    #     depending on how the validation dataset is implemented 
-    #     for this project (MSLS val, Pittburg val), it is always references then queries
-    #     [R1, R2, ..., Rn, Q1, Q2, ...]
-    #     """
-    #     val_step_outputs = self.val_outputs
-
-    #     dm = self.trainer.datamodule
-    #     # The following line is a hack: if we have only one validation set, then
-    #     # we need to put the outputs in a list (Pytorch Lightning does not do it presently)
-    #     if len(dm.val_datasets)==1: # we need to put the outputs in a list
-    #         val_step_outputs = [val_step_outputs]
-        
-    #     for i, (val_set_name, val_dataset) in enumerate(zip(dm.val_set_names, dm.val_datasets)):
-    #         if len(dm.val_datasets)==1: 
-    #             feats = torch.concat(val_step_outputs[i][0], dim=0)
-    #         else:
-    #             feats = torch.concat(val_step_outputs[i], dim=0)
-                
-    #         if 'pitts' in val_set_name:
-    #             # split to ref and queries
-    #             num_references = val_dataset.dbStruct.numDb
-    #             positives = val_dataset.getPositives()
-    #         elif 'msls' or 'tzb' in val_set_name:
-    #             # split to ref and queries
-    #             num_references = val_dataset.num_references
-    #             positives = val_dataset.pIdx
-    #         elif 'LTA' in val_set_name:
-    #             print("#TODO")
-    #         else:
-    #             print(f'Please implement validation_epoch_end for {val_set_name}')
-    #             raise NotImplemented 
-            
-    #         r_list = feats[ : num_references]
-    #         q_list = feats[num_references : ]
-    #         pitts_dict = utils.get_validation_recalls(
-    #             r_list=r_list, 
-    #             q_list=q_list,
-    #             k_values=[1, 5, 10, 15, 20, 50, 100],
-    #             gt=positives,
-    #             print_results=True,
-    #             dataset_name=val_set_name,
-    #             faiss_gpu=self.faiss_gpu
-    #         )
-    #         del r_list, q_list, feats, num_references, positives
-
-    #         self.log(f'{val_set_name}/R1', pitts_dict[1], prog_bar=False, logger=True)
-    #         self.log(f'{val_set_name}/R5', pitts_dict[5], prog_bar=False, logger=True)
-    #         self.log(f'{val_set_name}/R10', pitts_dict[10], prog_bar=False, logger=True)
-    #     print('\n\n')
-
-    #     # reset the outputs list
-    #     self.val_outputs = []
+        metrics = {name: metric_tensor[idx].item() for idx, name in enumerate(metric_names)}
+        self.log("u1652_vfmloc_R1", metrics["recall@1"], prog_bar=True, logger=True, sync_dist=True)
+        self.log("u1652_vfmloc_R5", metrics["recall@5"], prog_bar=False, logger=True, sync_dist=True)
+        self.log("u1652_vfmloc_R10", metrics["recall@10"], prog_bar=False, logger=True, sync_dist=True)
+        self.log("u1652_vfmloc_mAP", metrics["mAP"], prog_bar=False, logger=True, sync_dist=True)

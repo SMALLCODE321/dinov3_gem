@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import os
 from datetime import timedelta
 from pathlib import Path
@@ -21,6 +22,24 @@ CHECKPOINT_DIR = PROJECT_ROOT / "train_result" / "checkpoints"
 MODEL_DIR = PROJECT_ROOT / "train_result" / "model"
 
 
+def parse_args():
+    parser = argparse.ArgumentParser(description="Train DINOv3+GeM for VFM-Loc style cross-view geo-localization.")
+    parser.add_argument("--run-name", default=None, help="Name used for checkpoint subfolder and model-state file.")
+    parser.add_argument("--disable-orthogonal-adapter", action="store_true", help="Train strict DINOv3+GeM baseline without query adapter.")
+    parser.add_argument("--batch-size", type=int, default=80)
+    parser.add_argument("--sat-aug-per-place", type=int, default=5)
+    parser.add_argument("--num-workers", type=int, default=8)
+    parser.add_argument("--max-epochs", type=int, default=20)
+    parser.add_argument("--accumulate-grad-batches", type=int, default=1)
+    parser.add_argument("--lr", type=float, default=5e-6)
+    parser.add_argument("--weight-decay", type=float, default=1e-4)
+    parser.add_argument("--orthogonal-lambda", type=float, default=1e-3)
+    parser.add_argument("--seed", type=int, default=7)
+    parser.add_argument("--resume", action="store_true", help="Resume from this run's last.ckpt if it exists.")
+    parser.add_argument("--no-eval", action="store_true", help="Disable University-1652 eval at epoch end.")
+    return parser.parse_args()
+
+
 def count_training_images(folder: Path) -> int:
     count = 0
     for root, _, files in os.walk(folder):
@@ -29,13 +48,21 @@ def count_training_images(folder: Path) -> int:
 
 
 if __name__ == "__main__":
+    args = parse_args()
+    pl.seed_everything(args.seed, workers=True)
     torch.set_float32_matmul_precision("high")
 
-    batch_size = 80
-    sat_aug_per_place = 5
-    num_workers = 8
-    max_epochs = 20
-    accumulate_grad_batches = 1
+    use_orthogonal_adapter = not args.disable_orthogonal_adapter
+    run_name = args.run_name or ("orth_adapter" if use_orthogonal_adapter else "no_adapter")
+    checkpoint_dir = CHECKPOINT_DIR / run_name
+
+    batch_size = args.batch_size
+    sat_aug_per_place = args.sat_aug_per_place
+    num_workers = args.num_workers
+    max_epochs = args.max_epochs
+    accumulate_grad_batches = args.accumulate_grad_batches
+    if accumulate_grad_batches < 1:
+        raise ValueError("--accumulate-grad-batches must be >= 1.")
 
     num_devices = max(1, torch.cuda.device_count())
     num_images = count_training_images(TRAIN_DATA_ROOT)
@@ -49,6 +76,7 @@ if __name__ == "__main__":
         f"per-device batch {batch_size} | grad accumulation {accumulate_grad_batches} | "
         f"{optimizer_steps_per_epoch} optimizer steps/epoch | {total_iters} total iters"
     )
+    print(f"Run name: {run_name} | use_orthogonal_adapter={use_orthogonal_adapter}")
 
     datamodule = SatelliteSmallDataModule(
         data_path=str(TRAIN_DATA_ROOT),
@@ -72,9 +100,9 @@ if __name__ == "__main__":
             "p": 3.0,
             "eps": 1e-6,
         },
-        lr=5e-6,
+        lr=args.lr,
         optimizer="adamw",
-        weight_decay=1e-4,
+        weight_decay=args.weight_decay,
         momentum=0.9,
         lr_sched="linear",
         lr_sched_args={
@@ -86,10 +114,10 @@ if __name__ == "__main__":
         miner_name="MultiSimilarityMiner",
         miner_margin=0.3,
         faiss_gpu=False,
-        use_orthogonal_adapter=True,
-        orthogonal_lambda=1e-3,
+        use_orthogonal_adapter=use_orthogonal_adapter,
+        orthogonal_lambda=args.orthogonal_lambda,
         eval_config={
-            "enabled": True,
+            "enabled": not args.no_eval,
             "data_root": str(U1652_ROOT),
             "image_size": (336, 336),
             "mean": [0.485, 0.456, 0.406],
@@ -103,14 +131,14 @@ if __name__ == "__main__":
         },
     )
 
-    CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
     MODEL_DIR.mkdir(parents=True, exist_ok=True)
-    last_checkpoint_path = CHECKPOINT_DIR / "last.ckpt"
+    last_checkpoint_path = checkpoint_dir / "last.ckpt"
 
     checkpoint_callback = ModelCheckpoint(
         monitor="u1652_vfmloc_R1",
-        dirpath=str(CHECKPOINT_DIR),
-        filename="orth_adapter-epoch{epoch:02d}-r1{u1652_vfmloc_R1:.2f}",
+        dirpath=str(checkpoint_dir),
+        filename=f"{run_name}-epoch{{epoch:02d}}-r1{{u1652_vfmloc_R1:.2f}}",
         save_top_k=1,
         mode="max",
         save_last=True,
@@ -132,7 +160,7 @@ if __name__ == "__main__":
         accelerator="gpu" if torch.cuda.is_available() else "cpu",
         devices=num_devices,
         strategy=strategy,
-        default_root_dir=str(PROJECT_ROOT / "train_result"),
+        default_root_dir=str(PROJECT_ROOT / "train_result" / run_name),
         num_nodes=1,
         num_sanity_val_steps=0,
         precision="16-mixed" if torch.cuda.is_available() else "32-true",
@@ -144,7 +172,7 @@ if __name__ == "__main__":
         accumulate_grad_batches=accumulate_grad_batches,
     )
 
-    resume_path = str(last_checkpoint_path) if last_checkpoint_path.exists() else None
+    resume_path = str(last_checkpoint_path) if args.resume and last_checkpoint_path.exists() else None
     if resume_path:
         print(f"Resuming from {resume_path}")
     else:
@@ -152,6 +180,6 @@ if __name__ == "__main__":
 
     trainer.fit(model=model, datamodule=datamodule, ckpt_path=resume_path)
 
-    torch.save(model.state_dict(), MODEL_DIR / "orth_adapter_last_state.pth")
+    torch.save(model.state_dict(), MODEL_DIR / f"{run_name}_last_state.pth")
     if checkpoint_callback.best_model_path:
         print(f"Best checkpoint: {checkpoint_callback.best_model_path}")

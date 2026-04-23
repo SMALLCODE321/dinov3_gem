@@ -62,6 +62,8 @@ class University1652VfmLocEvaluator:
         ranks: Iterable[int] = (1, 5, 10),
         step_size: int = 256,
         use_procrustes: bool = True,
+        query_apply_adapter: bool = True,
+        use_pca: bool = True,
     ):
         self.model = model
         self.data_root = Path(data_root)
@@ -74,6 +76,8 @@ class University1652VfmLocEvaluator:
         self.ranks = list(ranks)
         self.step_size = step_size
         self.use_procrustes = use_procrustes
+        self.query_apply_adapter = query_apply_adapter
+        self.use_pca = use_pca
 
     def _build_transform(self):
         return T.Compose(
@@ -132,14 +136,18 @@ class University1652VfmLocEvaluator:
     @torch.no_grad()
     def evaluate(self):
         query_loader, gallery_loader = self._build_loaders()
-        query_features, query_labels = self._extract(query_loader, apply_adapter=True)
+        query_features, query_labels = self._extract(query_loader, apply_adapter=self.query_apply_adapter)
         gallery_features, gallery_labels = self._extract(gallery_loader, apply_adapter=False)
 
-        pca_dim = min(self.pca_dim, query_features.shape[-1], gallery_features.shape[-1])
-        q_mean, q_proj = pca_fit(query_features)
-        g_mean, g_proj = pca_fit(gallery_features)
-        query_vectors = pca_project(query_features, q_mean, q_proj, pca_dim)
-        gallery_vectors = pca_project(gallery_features, g_mean, g_proj, pca_dim)
+        if self.use_pca:
+            pca_dim = min(self.pca_dim, query_features.shape[-1], gallery_features.shape[-1])
+            q_mean, q_proj = pca_fit(query_features)
+            g_mean, g_proj = pca_fit(gallery_features)
+            query_vectors = pca_project(query_features, q_mean, q_proj, pca_dim)
+            gallery_vectors = pca_project(gallery_features, g_mean, g_proj, pca_dim)
+        else:
+            query_vectors = query_features.to(torch.float32)
+            gallery_vectors = gallery_features.to(torch.float32)
 
         if self.use_procrustes:
             query_ids = canonical_query_labels(query_labels)
